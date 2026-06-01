@@ -1,0 +1,1 @@
+1. Script for Finding a card that suggests a card based on your spending habits, like what categories the spend the most on

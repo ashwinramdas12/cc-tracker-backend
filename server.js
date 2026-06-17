@@ -15,13 +15,34 @@ const { accountsDetailed } = require("./accountsDetailed");
 const { connectToMongo } = require("./connectToMongo");
 const fuzzySearchCreditCards = require("./fuzzySearchCreditCards");
 const { searchCards } = require("./searchCards");
+const { searchRewards } = require("./searchRewards");
+const { searchSpendCategories } = require("./searchSpendCategories");
+const { searchTransferPartners } = require("./searchTransferPartners");
+const { searchIssuers } = require("./searchIssuers");
 const {
   createAndEmailVerificationCode,
   verifyCodeForUser,
   stripPassword,
 } = require("./authenticationCodes");
 const app = express();
-app.use(cors());
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://point-god-frontend-c9db2c986805.herokuapp.com",
+];
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(null, false);
+      }
+    },
+    credentials: true,
+  })
+);
 app.use(express.json());
 
 /* -------------------------------------------------------------------------- */
@@ -141,16 +162,32 @@ const toIsoDate = (value) => {
   return date.toISOString().slice(0, 10);
 };
 
+/** Start of UTC day as ISO string for comparing stored authorized_datetime values. */
+const toStartOfDayIso = (yyyyMmDd) => `${yyyyMmDd}T00:00:00.000Z`;
+
+/** Exclusive UTC end bound (start of day after yyyyMmDd) for authorized_datetime string range. */
+const toExclusiveEndIso = (yyyyMmDd) => {
+  const d = new Date(`${yyyyMmDd}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString();
+};
+
 const transactionsSyncCount = 500;
 
 const persistPlaidTransactionAdds = async (db, txs, user_id, plaid_item_id) => {
   const collection = db.collection("transactions");
   let count = 0;
   for (const tx of txs) {
+    delete tx.unofficial_currency_code
+    delete tx.counterparties
+    delete tx.payment_meta
+    delete tx.location
+    delete tx.pending_transaction_id
+    delete tx.personal_finance_category_icon_url
     await collection.updateOne(
       { user_id, transaction_id: tx.transaction_id },
       {
-        $set: { ...tx, user_id, plaid_item_id },
+        $set: { ...tx, user_id, plaid_item_id, update_from_plaid: true },
         $setOnInsert: { createdAt: new Date() },
       },
       { upsert: true }
@@ -167,14 +204,14 @@ const persistPlaidTransactionModified = async (db, txs, user_id, plaid_item_id) 
     const updateResult = await collection.updateOne(
       { user_id, transaction_id: tx.transaction_id },
       {
-        $set: { ...tx, user_id, plaid_item_id, updatedAt: new Date() },
+        $set: { ...tx, user_id, plaid_item_id, updatedAt: new Date(), update_from_plaid: true, type:"modified" },
       }
     );
     if (updateResult.matchedCount === 0) {
       await collection.updateOne(
         { user_id, transaction_id: tx.transaction_id },
         {
-          $set: { ...tx, user_id, plaid_item_id },
+          $set: { ...tx, user_id, plaid_item_id, update_from_plaid: true },
           $setOnInsert: { createdAt: new Date() },
         },
         { upsert: true }
@@ -572,6 +609,7 @@ api.post(
             card_id: card?.card_id || null,
             name: name,
             mask: acct.mask || null,
+            loading_transactions: true,
           },
           options: { upsert: true },
         });
@@ -652,13 +690,16 @@ api.get(
       filter.account_id = account_id;
     }
 
-    filter.date = { $gte: startStr, $lte: endStr };
+    filter.authorized_datetime = {
+      $gte: toStartOfDayIso(startStr),
+      $lt: toExclusiveEndIso(endStr),
+    };
 
     const transactions = await mongoOperation({
       operation: "find",
       collection: "transactions",
       filter,
-      options: { sort: { date: -1, transaction_id: -1 } },
+      options: { sort: { authorized_datetime: -1, transaction_id: -1 } },
     });
 
     const transactionsByAccount = Object.values(
@@ -739,6 +780,152 @@ api.get("/cards/search", wrap(async (req, res) => {
   return res.json({ cards });
 }));
 
+api.get("/cards/admin", wrap(async (req, res) => {
+  const { q, page: pageParam, pageSize: pageSizeParam } = req.query;
+  const query = typeof q === "string" ? q.trim() : "";
+  const page = Math.max(parseInt(pageParam, 10) || 1, 1);
+  const pageSize = Math.min(Math.max(parseInt(pageSizeParam, 10) || 10, 1), 50);
+
+  const allCards = await mongoOperation({
+    operation: "find",
+    collection: "cards",
+    filter: {},
+  });
+
+  let matched = allCards;
+  if (query) {
+    matched = searchCards(query, allCards, allCards.length);
+  } else {
+    matched = [...allCards].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  }
+
+  const total = matched.length;
+  const skip = (page - 1) * pageSize;
+  const cards = matched.slice(skip, skip + pageSize).map(({ _id, ...card }) => card);
+
+  return res.json({ cards, total, page, pageSize });
+}));
+
+api.get("/rewards/admin", wrap(async (req, res) => {
+  const { q, card_id: cardIdParam, page: pageParam, pageSize: pageSizeParam } = req.query;
+  const query = typeof q === "string" ? q.trim() : "";
+  const cardId = typeof cardIdParam === "string" ? cardIdParam.trim() : "";
+  const page = Math.max(parseInt(pageParam, 10) || 1, 1);
+  const pageSize = Math.min(Math.max(parseInt(pageSizeParam, 10) || 10, 1), 50);
+
+  const allRewards = await mongoOperation({
+    operation: "find",
+    collection: "rewards",
+    filter: {},
+  });
+
+  let matched = allRewards;
+  if (cardId) {
+    matched = matched.filter((reward) => reward.card_id === cardId);
+  }
+  if (query) {
+    matched = searchRewards(query, matched, matched.length);
+  } else {
+    matched = [...matched].sort((a, b) =>
+      (a.reward_id || "").localeCompare(b.reward_id || "")
+    );
+  }
+
+  const total = matched.length;
+  const skip = (page - 1) * pageSize;
+  const rewards = matched.slice(skip, skip + pageSize).map(({ _id, ...reward }) => reward);
+
+  return res.json({ rewards, total, page, pageSize });
+}));
+
+api.get("/spend-categories/admin", wrap(async (req, res) => {
+  const { q, page: pageParam, pageSize: pageSizeParam } = req.query;
+  const query = typeof q === "string" ? q.trim() : "";
+  const page = Math.max(parseInt(pageParam, 10) || 1, 1);
+  const pageSize = Math.min(Math.max(parseInt(pageSizeParam, 10) || 10, 1), 50);
+
+  const allCategories = await mongoOperation({
+    operation: "find",
+    collection: "spend_categories",
+    filter: {},
+  });
+
+  let matched = allCategories;
+  if (query) {
+    matched = searchSpendCategories(query, allCategories, allCategories.length);
+  } else {
+    matched = [...allCategories].sort((a, b) =>
+      (a.category || "").localeCompare(b.category || "")
+    );
+  }
+
+  const total = matched.length;
+  const skip = (page - 1) * pageSize;
+  const categories = matched
+    .slice(skip, skip + pageSize)
+    .map(({ _id, ...category }) => ({ ...category, _id: _id?.toString?.() ?? _id }));
+
+  return res.json({ categories, total, page, pageSize });
+}));
+
+api.get("/transfer-partners/admin", wrap(async (req, res) => {
+  const { q, page: pageParam, pageSize: pageSizeParam } = req.query;
+  const query = typeof q === "string" ? q.trim() : "";
+  const page = Math.max(parseInt(pageParam, 10) || 1, 1);
+  const pageSize = Math.min(Math.max(parseInt(pageSizeParam, 10) || 10, 1), 50);
+
+  const allPartners = await mongoOperation({
+    operation: "find",
+    collection: "transfer_partners",
+    filter: {},
+  });
+
+  let matched = allPartners;
+  if (query) {
+    matched = searchTransferPartners(query, allPartners, allPartners.length);
+  } else {
+    matched = [...allPartners].sort((a, b) =>
+      (a.program || "").localeCompare(b.program || "")
+    );
+  }
+
+  const total = matched.length;
+  const skip = (page - 1) * pageSize;
+  const transferPartners = matched
+    .slice(skip, skip + pageSize)
+    .map(({ _id, ...partner }) => partner);
+
+  return res.json({ transferPartners, total, page, pageSize });
+}));
+
+api.get("/issuers/admin", wrap(async (req, res) => {
+  const { q, page: pageParam, pageSize: pageSizeParam } = req.query;
+  const query = typeof q === "string" ? q.trim() : "";
+  const page = Math.max(parseInt(pageParam, 10) || 1, 1);
+  const pageSize = Math.min(Math.max(parseInt(pageSizeParam, 10) || 10, 1), 50);
+
+  const allIssuers = await mongoOperation({
+    operation: "find",
+    collection: "issuers",
+    filter: {},
+  });
+
+  let matched = allIssuers;
+  if (query) {
+    matched = searchIssuers(query, allIssuers, allIssuers.length);
+  } else {
+    matched = [...allIssuers].sort((a, b) =>
+      (a.issuer_id || "").localeCompare(b.issuer_id || "")
+    );
+  }
+
+  const total = matched.length;
+  const skip = (page - 1) * pageSize;
+  const issuers = matched.slice(skip, skip + pageSize).map(({ _id, ...issuer }) => issuer);
+
+  return res.json({ issuers, total, page, pageSize });
+}));
+
 api.post(
   "/mongoOperation",
   wrap(async (req, res) => {
@@ -748,6 +935,109 @@ api.post(
     return res.json(result);
   })
 );
+
+// POST /cards/best
+// Returns the top 5 cards ranked by estimated annual cash earn for a given category + spend
+api.post("/cards/best", wrap(async (req, res) => {
+  const { category, category_spend, existing_cards } = req.body;
+  if (!category || typeof category !== "string") {
+    return res.status(400).json({ error: "category is required" });
+  }
+  
+  const mongo = await connectToMongo();
+  const db = mongo.db(process.env.DATABASE_NAME);
+
+  const [allCards, allRewards, allIssuers] = await Promise.all([
+    db.collection("cards").find({ active: true, card_id: { $nin: existing_cards.length > 0 ? existing_cards : [] } }).toArray(),
+    db.collection("rewards").find({ category:{$regex: category} }).toArray(),
+    db.collection("issuers").find({}).toArray(),
+  ]);
+
+  const issuerByIssuerId = Object.fromEntries(allIssuers.map((i) => [i.issuer_id, i]));
+  const cardById = Object.fromEntries(allCards.map((c) => [c.card_id, c]));
+
+  const rewardsByCardId = allRewards.reduce((acc, r) => {
+    if (!acc[r.card_id]) acc[r.card_id] = [];
+    acc[r.card_id].push(r);
+    return acc;
+  }, {});
+
+  // Annualise a credit reward's spend cap value
+  const annualisedCreditValue = (reward) => {
+    if (reward.spend_cap_annual != null) return reward.spend_cap_annual;
+    if (reward.spend_cap_biannual != null) return reward.spend_cap_biannual * 2;
+    if (reward.spend_cap_quarterly != null) return reward.spend_cap_quarterly * 4;
+    if (reward.spend_cap_monthly != null) return reward.spend_cap_monthly * 12;
+    return 0;
+  };
+
+  const scored = Object.entries(rewardsByCardId).map(([cardId, rewards]) => {
+    const card = cardById[cardId];
+    if (!card) return null;
+
+    const issuer = issuerByIssuerId[card.issuer_id] ?? {};
+    const pointValueCents = issuer.point_value_cents ?? 1;
+
+    // Best rate-based reward (base or merchant type)
+    const baseReward = rewards
+      .filter((r) => r.type === "base" || r.type === "merchant")
+      .sort((a, b) => (b.rate ?? 0) - (a.rate ?? 0))[0] ?? null;
+
+    // Stack credit rewards greedily (highest value first) until spend is exhausted or all used
+    const creditRewards = rewards
+      .filter((r) => r.type === "credit" || r.type === "merchantCredit")
+      .sort((a, b) => annualisedCreditValue(b) - annualisedCreditValue(a));
+
+    let remainingSpend = category_spend;
+    let cashFromCredits = 0;
+    const stackedCreditRewards = [];
+    for (const cr of creditRewards) {
+      if (remainingSpend <= 0) break;
+      const creditVal = annualisedCreditValue(cr);
+      const applied = Math.min(creditVal, remainingSpend);
+      cashFromCredits += applied;
+      remainingSpend -= applied;
+      stackedCreditRewards.push(cr);
+    }
+
+    const cashFromPoints = baseReward
+      ? (category_spend * (baseReward.rate ?? 0) * pointValueCents) / 100
+      : 0;
+    const estimatedCashEarn = cashFromPoints + cashFromCredits;
+
+    return { cardId, card, estimatedCashEarn, baseReward, creditRewards: stackedCreditRewards };
+  }).filter(Boolean);
+
+  // Cards with both a base reward + credit rewards rank highest, then sort by estimated cash
+  scored.sort((a, b) => {
+    const aHasBoth = a.baseReward && a.creditRewards.length > 0 ? 1 : 0;
+    const bHasBoth = b.baseReward && b.creditRewards.length > 0 ? 1 : 0;
+    if (bHasBoth !== aHasBoth) return bHasBoth - aHasBoth;
+    return b.estimatedCashEarn - a.estimatedCashEarn;
+  });
+
+  const result = {};
+  scored.slice(0, 5).forEach(({ cardId, card, estimatedCashEarn }, idx) => {
+    const { _id, ...cardWithoutId } = card;
+    result[cardId] = {
+      card_rank: idx + 1,
+      estimated_cash_earn: `$${estimatedCashEarn.toFixed(2)}`,
+      card: cardWithoutId,
+    };
+  });
+
+  return res.json(result);
+}));
+
+/* -------------------------------------------------------------------------- */
+/*  Push notifications                                                        */
+/* -------------------------------------------------------------------------- */
+
+api.get('/push/vapid-public-key', (req, res) => {
+  const key = process.env.VAPID_PUBLIC_KEY;
+  if (!key) return res.status(500).json({ error: 'VAPID_PUBLIC_KEY not configured' });
+  res.json({ publicKey: key });
+});
 
 /* -------------------------------------------------------------------------- */
 /*  Mount + error handler                                                     */

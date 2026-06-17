@@ -90,6 +90,45 @@ const getMonthYearLabelsForYearView = (yearNum, capField) => {
     return allMonthYearLabelsInYear(yearNum);
 };
 
+/** Inclusive month_year labels from reward start through end ("May 2026" format). */
+const getMonthYearLabelsForRewardWindow = (startDate, endDate, referenceDate = new Date()) => {
+    if (!startDate && !endDate) {
+        return null;
+    }
+
+    const ref = referenceDate instanceof Date ? referenceDate : new Date(referenceDate);
+    const rangeStart = startDate
+        ? new Date(new Date(startDate).getFullYear(), new Date(startDate).getMonth(), 1)
+        : new Date(1970, 0, 1);
+    const end = endDate ? new Date(endDate) : ref;
+    const rangeEnd = new Date(end.getFullYear(), end.getMonth(), 1);
+
+    if (rangeStart > rangeEnd) {
+        return [];
+    }
+
+    const labels = [];
+    let current = rangeStart;
+    while (current <= rangeEnd) {
+        labels.push(monthYearLabel(current));
+        current = new Date(current.getFullYear(), current.getMonth() + 1, 1);
+    }
+    return labels;
+};
+
+/** Mongo filter for spend summaries within a reward's active month_year window. */
+const buildRewardWindowMonthYearFilter = (reward, referenceDate = new Date()) => {
+    const labels = getMonthYearLabelsForRewardWindow(
+        reward?.start_date,
+        reward?.end_date,
+        referenceDate
+    );
+    if (labels === null) {
+        return {};
+    }
+    return { month_year: { $in: labels } };
+};
+
 const sumMerchantSpendForPeriod = (spendSummaryDocs, accountId, merchant, monthYearLabels) => {
     const labelSet = new Set(monthYearLabels);
     return spendSummaryDocs.reduce((total, doc) => {
@@ -502,6 +541,8 @@ module.exports = {
     attachCreditMerchantSpend,
     getActiveCapField,
     getMonthYearLabelsForCap,
+    getMonthYearLabelsForRewardWindow,
+    buildRewardWindowMonthYearFilter,
 };
 
 if (require.main === module) {

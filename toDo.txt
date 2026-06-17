@@ -1,1 +1,19 @@
-1. Script for Finding a card that suggests a card based on your spending habits, like what categories the spend the most on
+1. When onboarding a new Account, get the last two years of transactions to find the annual fee date and to process current year of transactions
+3. notifications
+4. Script that deletes transactions over a year old
+
+
+FRONTEND
+1. Make mobile responsive
+
+
+TESTING:
+- Test adding new account
+- Test default reward - DONE
+- Test base reward
+- Test annual fee
+- Test merchant credit
+- Test statement credit
+
+Security
+- make soc2

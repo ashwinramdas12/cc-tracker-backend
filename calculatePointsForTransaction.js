@@ -2,6 +2,7 @@ require('dotenv').config();
 const { connectToMongo, closeMongo } = require('./connectToMongo');
 const { buildRewardWindowMonthYearFilter } = require('./accountsDetailed');
 const { formatMonthYear } = require('./utility');
+const checkForBonusReward = require('./checkForBonusReward');
 //TO DO:
 // IDENTIFY CREDITS, SHOULD WE ADD TO SPEND SUMMARY?
 // NEED TO TAG WITH UNCLASSIFIED IF WE CANT PROPERLY CATEGORIZE THE TRANSACTION
@@ -170,6 +171,19 @@ async function calculatePointsForTransaction(transaction) {
             ],
         });
 
+        let bonusReward = await rewardsCollection.findOne({ 
+            card_id: card.card_id,
+            type: "bonus",
+            $or:[
+                {start_date: {$lte: now}},
+                {start_date: null}
+            ],
+            $or:[
+                {end_date: {$gte: now}},
+                {end_date: null}
+            ],
+        });
+
         let isMerchantReward = merchantReward !== null;
         let reward = merchantReward || categoryReward;
         let perTransactionMinimumMet = true;
@@ -215,11 +229,13 @@ async function calculatePointsForTransaction(transaction) {
                 });
                 isMerchantReward = merchantReward !== null;
                 reward = merchantReward || categoryReward;
+                //check for bonus reward
+                const bonusRewardCheck = await checkForBonusReward(user.user_id, accountId, bonusReward, spendCategory, spendAmount, now);
                 if(!reward){
                     return {
                         success: true,
                         transaction_id: transaction.transaction_id,
-                        points: card.default_point_rate * spendAmount,
+                        points: card.default_point_rate * spendAmount + bonusRewardCheck,
                         points_rate: card.default_point_rate,
                         overage_points_rate: card.default_point_rate,
                         spend_over_cap: 0,
@@ -508,12 +524,13 @@ async function calculatePointsForTransaction(transaction) {
             pointsRate = card.default_point_rate;
             points = pointsRate * spendAmount;
         }
-
+        //CHECK IF THERE'S A BONUS REWARD
+        const bonusRewardCheck = await checkForBonusReward(user.user_id, accountId, bonusReward, spendCategory, spendAmount, now);
         await mongo.close();
         return {
             success: true,
             transaction_id: transaction.transaction_id,
-            points: Math.round(points),
+            points: Math.round(points) + bonusRewardCheck,
             points_rate: pointsRate,
             overage_points_rate: overagePointsRate,
             spend_over_cap: spendOverCap,

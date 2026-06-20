@@ -147,6 +147,7 @@ async function calculatePointsForTransaction(transaction) {
         console.log("2")
         let merchantReward = await rewardsCollection.findOne({ 
             card_id: card.card_id,
+            type:{$ne:"bonus"},
             merchants: merchant, 
             $or:[
                 {start_date: {$lte: now}},
@@ -160,6 +161,7 @@ async function calculatePointsForTransaction(transaction) {
 
         let categoryReward = await rewardsCollection.findOne({ 
             card_id: card.card_id,
+            type:{$ne:"bonus"},
             plaid_categories: plaidSpendCategory,
             $or:[
                 {start_date: {$lte: now}},
@@ -203,6 +205,7 @@ async function calculatePointsForTransaction(transaction) {
                 merchantReward = await rewardsCollection.findOne({ 
                     card_id: card.card_id,
                     merchants: merchant, 
+                    type:{$ne:"bonus"},
                     activation_required: false,
                     $or:[
                         {start_date: {$lte: now}},
@@ -217,6 +220,7 @@ async function calculatePointsForTransaction(transaction) {
                 categoryReward = await rewardsCollection.findOne({ 
                     card_id: card.card_id,
                     plaid_categories: plaidSpendCategory,
+                    type:{$ne:"bonus"},
                     activation_required: false,
                     $or:[
                         {start_date: {$lte: now}},

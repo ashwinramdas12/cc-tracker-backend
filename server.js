@@ -605,7 +605,6 @@ api.post(
           payload: {
             user_id,
             account_id: acct.account_id,
-            plaid_persistent_account_id: acct.persistent_account_id || null,
             card_id: card?.card_id || null,
             name: name,
             mask: acct.mask || null,

@@ -513,7 +513,7 @@ api.post(
 
     const linkResponse = await plaidClient.linkTokenCreate({
       user: { client_user_id: user_id },
-      client_name: process.env.PLAID_CLIENT_NAME || "CC Tracker",
+      client_name: process.env.PLAID_CLIENT_NAME || "PointGod",
       products: plaidProducts,
       country_codes: plaidCountryCodes,
       webhook: process.env.ENDPOINT_BASE + '/api/plaid/webhook/fQqMLcssXf',
@@ -610,6 +610,7 @@ api.post(
           payload: {
             user_id,
             account_id: acct.account_id,
+            plaid_item_id: plaidItemId,
             card_id: card?.card_id || null,
             name: name,
             mask: acct.mask || null,

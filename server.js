@@ -174,10 +174,14 @@ const toExclusiveEndIso = (yyyyMmDd) => {
 
 const transactionsSyncCount = 500;
 
-const persistPlaidTransactionAdds = async (db, txs, user_id, plaid_item_id) => {
+const persistPlaidTransactionAdds = async (db, txs, user_id, plaid_item_id, { initialSync = false, cutoffDate = null } = {}) => {
   const collection = db.collection("transactions");
   let count = 0;
   for (const tx of txs) {
+    if (cutoffDate) {
+      const txDate = new Date(tx.authorized_datetime || tx.date);
+      if (txDate < cutoffDate) continue;
+    }
     delete tx.unofficial_currency_code
     delete tx.counterparties
     delete tx.payment_meta
@@ -187,7 +191,7 @@ const persistPlaidTransactionAdds = async (db, txs, user_id, plaid_item_id) => {
     await collection.updateOne(
       { user_id, transaction_id: tx.transaction_id },
       {
-        $set: { ...tx, user_id, plaid_item_id, update_from_plaid: true },
+        $set: { ...tx, user_id, plaid_item_id, update_from_plaid: true, ...(initialSync ? { initial_sync: true } : {}) },
         $setOnInsert: { createdAt: new Date() },
       },
       { upsert: true }
@@ -233,28 +237,46 @@ const persistPlaidTransactionRemoved = async (db, removed, user_id) => {
   return deleteResult.deletedCount;
 };
 
-const syncTransactionsForItem = async (item, user_id) => {
+const syncTransactionsForItem = async (item, user_id, { initialSync = false, maxMonths = null } = {}) => {
   const mongo = await connectToMongo();
   const db = mongo.db(process.env.DATABASE_NAME);
 
+  const cutoffDate = maxMonths
+    ? new Date(Date.now() - maxMonths * 30 * 24 * 60 * 60 * 1000)
+    : null;
+
   const stats = { added: 0, modified: 0, removed: 0 };
-  let cursor =
+
+  // stableCursor is the cursor we started this sync session with.
+  // If Plaid returns TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION we revert to it.
+  const stableCursor =
     item.transactions_cursor && String(item.transactions_cursor).length > 0
       ? item.transactions_cursor
       : undefined;
+  let cursor = stableCursor;
 
   while (true) {
-    const plaidResponse = await plaidClient.transactionsSync({
-      access_token: item.access_token,
-      cursor,
-      count: transactionsSyncCount,
-      options: {
-        include_original_description: true,
-
-      },
-    });
-
-    const data = plaidResponse.data;
+    let data;
+    try {
+      const plaidResponse = await plaidClient.transactionsSync({
+        access_token: item.access_token,
+        cursor,
+        count: transactionsSyncCount,
+        options: { include_original_description: true },
+      });
+      data = plaidResponse.data;
+    } catch (err) {
+      const errCode = err?.response?.data?.error_code;
+      if (errCode === "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION") {
+        // Plaid mutated data mid-pagination — restart from the stable cursor
+        cursor = stableCursor;
+        stats.added = 0;
+        stats.modified = 0;
+        stats.removed = 0;
+        continue;
+      }
+      throw err;
+    }
 
     stats.removed += await persistPlaidTransactionRemoved(db, data.removed || [], user_id);
     stats.modified += await persistPlaidTransactionModified(
@@ -267,9 +289,13 @@ const syncTransactionsForItem = async (item, user_id) => {
       db,
       data.added || [],
       user_id,
-      item.plaid_item_id
+      item.plaid_item_id,
+      { initialSync, cutoffDate }
     );
 
+    console.log("added: ", stats.added.length);
+    console.log("modified: ", stats.modified.length);
+    console.log("removed: ", stats.removed.length);
     cursor = data.next_cursor;
 
     if (!data.has_more) {
@@ -645,7 +671,11 @@ api.post(
       return res.status(400).json({ error: "webhook_type, webhook_code, and item_id are required" });
     }
 
-    if(webhook_code==="SYNC_UPDATES_AVAILABLE"){
+    const SYNC_CODES = ["SYNC_UPDATES_AVAILABLE", "INITIAL_UPDATE", "HISTORICAL_UPDATE"];
+
+    if (SYNC_CODES.includes(webhook_code)) {
+      console.log("webhook_code: ", webhook_code);
+      console.log("item_id: ", item_id);
       const item = await mongoOperation({
         operation: "findOne",
         collection: "plaid_items",
@@ -653,22 +683,17 @@ api.post(
       });
       if (!item) return res.status(404).json({ error: "item not found" });
 
-      const totals = { added: 0, modified: 0, removed: 0 };
+      const itemUserId = item.user_id;
+      const isInitialSync = webhook_code === "INITIAL_UPDATE" || webhook_code === "HISTORICAL_UPDATE";
+      const maxMonths = webhook_code === "HISTORICAL_UPDATE" ? 15 : null;
 
-      
-      const itemStats = await syncTransactionsForItem(item, user_id);
-      totals.added += itemStats.added;
-      totals.modified += itemStats.modified;
-      totals.removed += itemStats.removed;
-      console.log("total transactions synced: ", totals);
+      const stats = await syncTransactionsForItem(item, itemUserId, { initialSync: isInitialSync, maxMonths });
+      console.log(`${webhook_code} sync complete for item ${item_id}:`, stats);
+
+      return res.json({ webhook_code, item_id, user_id: itemUserId, stats });
     }
 
-    return res.json({
-      user_id,
-      itemsSynced: items.length,
-      totals,
-      byItem,
-    });
+    return res.json({ webhook_code, handled: false });
   })
 );
 

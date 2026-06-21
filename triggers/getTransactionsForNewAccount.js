@@ -14,47 +14,75 @@ exports = async function (changeEvent) {
         const accountId = account.account_id;
         const userId = account.user_id;
 
-        // Get the plaid item for this account to retrieve the access token
-        const plaidItem = await plaidItemsCollection.findOne({ user_id: userId });
+        const plaidItem = await plaidItemsCollection.findOne({ user_id: userId, plaid_item_id: account.plaid_item_id });
         if (!plaidItem?.access_token) {
             console.log("No plaid item / access token found for user:", userId);
             return;
         }
 
-        // Fetch 15 months of transactions from Plaid
-        const endDate = new Date();
-        const startDate = new Date();
-        startDate.setMonth(startDate.getMonth() - 2);
-        const formatDate = (d) => d.toISOString().split('T')[0];
+        // Use the stored cursor if one exists (first call will have none)
+        const stableCursor = plaidItem.transactions_cursor || null;
+        let cursor = stableCursor;
+        const allAdded = [];
 
-        const plaidResponse = await context.http.post({
-            url: "https://production.plaid.com/transactions/get",
-            headers: { "Content-Type": ["application/json"] },
-            body: JSON.stringify({
+        // Paginate through transactions/sync until has_more is false.
+        // If Plaid mutates data mid-pagination, restart from the stable cursor.
+        let hasMore = true;
+        while (hasMore) {
+            const requestBody = {
                 client_id: context.values.get("PLAID_CLIENT_ID"),
                 secret: context.values.get("PLAID_SECRET"),
                 access_token: plaidItem.access_token,
-                start_date: formatDate(startDate),
-                end_date: formatDate(endDate),
-                options: {
-                    account_ids: [accountId],
-                    count: 500,
-                    include_original_description: true,
-                }
-            })
-        });
-        console.log("plaidResponse: ", plaidResponse);
-        console.log("plaidResponse.body: ", plaidResponse.body);
-        console.log("plaidResponse.body.text(): ", plaidResponse.body.text());
-        const body = JSON.parse(plaidResponse.body.text());
-        const transactions = body.transactions || [];
+                count: 500,
+                options: { include_original_description: true },
+            };
+            if (cursor) {
+                requestBody.cursor = cursor;
+            }
+
+            const plaidResponse = await context.http.post({
+                url: "https://production.plaid.com/transactions/sync",
+                headers: { "Content-Type": ["application/json"] },
+                body: JSON.stringify(requestBody),
+            });
+
+            const body = JSON.parse(plaidResponse.body.text());
+
+            if (body.error_code === "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION") {
+                // Plaid mutated data mid-pagination — restart from the stable cursor
+                cursor = stableCursor;
+                allAdded.length = 0;
+                continue;
+            }
+
+            if (body.error_code) {
+                throw new Error(`Plaid sync error: ${body.error_code} — ${body.error_message}`);
+            }
+
+            allAdded.push(...(body.added || []));
+            cursor = body.next_cursor;
+            hasMore = body.has_more;
+        }
+
+        // Save the final cursor back so future syncs pick up where we left off
+        await plaidItemsCollection.updateOne(
+            { plaid_item_id: plaidItem.plaid_item_id },
+            { $set: { transactions_cursor: cursor || "" } }
+        );
+
+        // Filter to only transactions belonging to this specific account
+        const transactions = allAdded.filter(tx => tx.account_id === accountId);
 
         if (!transactions.length) {
             console.log("No transactions returned from Plaid for account:", accountId);
+            await accountsCollection.updateOne(
+                { account_id: accountId },
+                { $set: { loading_transactions: false } }
+            );
             return;
         }
 
-        // Persist all transactions (mirrors persistPlaidTransactionAdds logic)
+        // Persist transactions
         for (const tx of transactions) {
             delete tx.unofficial_currency_code;
             delete tx.counterparties;
@@ -80,8 +108,6 @@ exports = async function (changeEvent) {
             const card = await cardsCollection.findOne({ card_id: account.card_id });
 
             if (card?.annual_fee && card.annual_fee > 0) {
-                // Look for the annual fee transaction — typically a negative-amount charge
-                // with "annual fee" in the name/description
                 const annualFeeDescription = card.annual_fee_statement_description;
                 const annualFeeTx = transactions.filter(tx => {
                     const name = (tx.name || tx.original_description || '').toLowerCase();
@@ -100,16 +126,14 @@ exports = async function (changeEvent) {
             }
         }
 
-        // If no annual fee transaction found, fall back to oldest transaction date
-        // (only if the oldest transaction is less than 12 months old)
+        // Fall back to oldest transaction date if no annual fee transaction found
         if (!openedDate) {
             const sorted = [...transactions].sort((a, b) => {
                 const da = new Date(a.authorized_datetime || a.date);
                 const db = new Date(b.authorized_datetime || b.date);
                 return da - db;
             });
-            const oldestTx = sorted[0];
-            const oldestDate = new Date(oldestTx.authorized_datetime || oldestTx.date);
+            const oldestDate = new Date(sorted[0].authorized_datetime || sorted[0].date);
             const twelveMonthsAgo = new Date();
             twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12);
 
@@ -118,20 +142,14 @@ exports = async function (changeEvent) {
             }
         }
 
-        if (openedDate) {
-            const updatePayload = { opened_date: openedDate };
-            if (nextAnnualFeeDate) updatePayload.next_annual_fee_date = nextAnnualFeeDate;
-            updatePayload.loading_transactions = false;
-            await accountsCollection.updateOne(
-                { account_id: accountId },
-                { $set: updatePayload }
-            );
-        } else {
-            await accountsCollection.updateOne(
-                { account_id: accountId },
-                { $set: { loading_transactions: false } }
-            );
-        }
+        const updatePayload = { loading_transactions: false };
+        if (openedDate) updatePayload.opened_date = openedDate;
+        if (nextAnnualFeeDate) updatePayload.next_annual_fee_date = nextAnnualFeeDate;
+
+        await accountsCollection.updateOne(
+            { account_id: accountId },
+            { $set: updatePayload }
+        );
 
     } catch (err) {
         console.log("error in getTransactionsForNewAccount:", err.message);

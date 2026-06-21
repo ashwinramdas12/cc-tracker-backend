@@ -663,8 +663,9 @@ api.post(
 
 /* ---------- Transactions ---------- */
 
-api.post(
-  "/plaid/webhook/fQqMLcssXf",
+// Registered on app (not api) so Plaid can reach it without auth headers
+app.post(
+  "/api/plaid/webhook/fQqMLcssXf",
   wrap(async (req, res) => {
     const { webhook_type, webhook_code, item_id } = req.body || {};
     if (!webhook_type || !webhook_code || !item_id) {

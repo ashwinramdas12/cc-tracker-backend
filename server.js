@@ -542,12 +542,16 @@ api.post(
     if (!publicToken) return res.status(400).json({ error: "public_token is required" });
 
     const exchange = await plaidClient.itemPublicTokenExchange({ public_token: publicToken });
+    console.log("exchange: ", exchange.data);
     const accessToken = exchange.data.access_token;
     const plaidItemId = exchange.data.item_id;
-
+    
     const accountsResponse = await plaidClient.accountsGet({ access_token: accessToken });
+    console.log("accountsResponse: ", accountsResponse.data);
     const plaidAccounts = accountsResponse.data.accounts || [];
+    console.log("plaidAccounts: ", plaidAccounts);
     const plaidItem = accountsResponse.data.item || {};
+    console.log("plaidItem: ", plaidItem);
 
     let institutionInfo = institution || null;
     if (!institutionInfo && plaidItem.institution_id) {
@@ -596,6 +600,7 @@ api.post(
     const savedAccounts = [];
     for (const acct of plaidAccounts) {
       if (acct.subtype === "credit card") {
+        console.log("acct: ", acct);
         const name = acct.official_name || acct.name;
         const card = fuzzySearchCreditCards(name, creditCards, institutionInfo?.name);
         await mongoOperation({

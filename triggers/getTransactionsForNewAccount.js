@@ -43,7 +43,9 @@ exports = async function (changeEvent) {
                 }
             })
         });
-
+        console.log("plaidResponse: ", plaidResponse);
+        console.log("plaidResponse.body: ", plaidResponse.body);
+        console.log("plaidResponse.body.text(): ", plaidResponse.body.text());
         const body = JSON.parse(plaidResponse.body.text());
         const transactions = body.transactions || [];
 

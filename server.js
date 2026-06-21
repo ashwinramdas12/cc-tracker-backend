@@ -264,6 +264,8 @@ const syncTransactionsForItem = async (item, user_id, { initialSync = false, max
         count: transactionsSyncCount,
         options: { include_original_description: true },
       });
+      console.log("plaidResponse: ", plaidResponse);
+      console.log("plaidResponse.data: ", plaidResponse.data);
       data = plaidResponse.data;
     } catch (err) {
       const errCode = err?.response?.data?.error_code;
@@ -277,7 +279,7 @@ const syncTransactionsForItem = async (item, user_id, { initialSync = false, max
       }
       throw err;
     }
-
+    console.log("data: ", data);
     stats.removed += await persistPlaidTransactionRemoved(db, data.removed || [], user_id);
     stats.modified += await persistPlaidTransactionModified(
       db,
@@ -293,9 +295,9 @@ const syncTransactionsForItem = async (item, user_id, { initialSync = false, max
       { initialSync, cutoffDate }
     );
 
-    console.log("added: ", stats.added.length);
-    console.log("modified: ", stats.modified.length);
-    console.log("removed: ", stats.removed.length);
+    console.log("added: ", stats.added);
+    console.log("modified: ", stats.modified);
+    console.log("removed: ", stats.removed);
     cursor = data.next_cursor;
 
     if (!data.has_more) {

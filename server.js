@@ -270,7 +270,6 @@ const syncTransactionsForItem = async (item, user_id, { initialSync = false, max
         count: transactionsSyncCount,
         options: options,
       });
-      console.log("plaidResponse: ", plaidResponse);
       console.log("plaidResponse.data: ", plaidResponse.data);
       data = plaidResponse.data;
     } catch (err) {
@@ -1067,6 +1066,41 @@ api.post("/cards/best", wrap(async (req, res) => {
 
   return res.json(result);
 }));
+
+/* ---------- Plaid Item removal ---------- */
+
+api.delete(
+  '/plaid/item',
+  wrap(async (req, res) => {
+    const { user_id, plaid_item_id } = req.body || {};
+    if (!user_id || !plaid_item_id) {
+      return res.status(400).json({ error: 'user_id and plaid_item_id are required' });
+    }
+
+    const item = await mongoOperation({
+      operation: 'findOne',
+      collection: 'plaid_items',
+      filter: { user_id, plaid_item_id },
+    });
+    if (!item) return res.status(404).json({ error: 'Plaid item not found' });
+
+    await plaidClient.itemRemove({ access_token: item.access_token });
+
+    await mongoOperation({
+      operation: 'deleteOne',
+      collection: 'plaid_items',
+      filter: { plaid_item_id },
+    });
+
+    await mongoOperation({
+      operation: 'deleteMany',
+      collection: 'accounts',
+      filter: { plaid_item_id },
+    });
+
+    return res.json({ success: true, plaid_item_id });
+  })
+);
 
 /* -------------------------------------------------------------------------- */
 /*  Push notifications                                                        */

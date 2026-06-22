@@ -258,11 +258,17 @@ const syncTransactionsForItem = async (item, user_id, { initialSync = false, max
   while (true) {
     let data;
     try {
+      const options = {
+        include_original_description: true,
+      };
+      if (maxMonths) {
+        options.days_requested = maxMonths * 30;
+      }
       const plaidResponse = await plaidClient.transactionsSync({
         access_token: item.access_token,
         cursor,
         count: transactionsSyncCount,
-        options: { include_original_description: true },
+        options: options,
       });
       console.log("plaidResponse: ", plaidResponse);
       console.log("plaidResponse.data: ", plaidResponse.data);
@@ -279,7 +285,7 @@ const syncTransactionsForItem = async (item, user_id, { initialSync = false, max
       }
       throw err;
     }
-    console.log("data: ", data);
+
     stats.removed += await persistPlaidTransactionRemoved(db, data.removed || [], user_id);
     stats.modified += await persistPlaidTransactionModified(
       db,

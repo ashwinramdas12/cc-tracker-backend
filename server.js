@@ -190,10 +190,13 @@ const persistPlaidTransactionAdds = async (db, txs, user_id, plaid_item_id, { in
     delete tx.location
     delete tx.pending_transaction_id
     delete tx.personal_finance_category_icon_url
+    if(!user_id){
+      console.log("user_id is not set for transaction: ", tx.transaction_id);
+    }
     await collection.updateOne(
       { user_id, transaction_id: tx.transaction_id },
       {
-        $set: { ...tx, user_id, plaid_item_id, update_from_plaid: true, ...(initialSync ? { initial_sync: true } : {}) },
+        $set: { ...tx, user_id, plaid_item_id, insert_from_added:true, update_from_plaid: true, ...(initialSync ? { initial_sync: true } : {}) },
         $setOnInsert: { createdAt: new Date() },
       },
       { upsert: true }
@@ -217,7 +220,7 @@ const persistPlaidTransactionModified = async (db, txs, user_id, plaid_item_id) 
       await collection.updateOne(
         { user_id, transaction_id: tx.transaction_id },
         {
-          $set: { ...tx, user_id, plaid_item_id, update_from_plaid: true },
+          $set: { ...tx, user_id, plaid_item_id, update_from_plaid: true, insert_from_modified: true },
           $setOnInsert: { createdAt: new Date() },
         },
         { upsert: true }

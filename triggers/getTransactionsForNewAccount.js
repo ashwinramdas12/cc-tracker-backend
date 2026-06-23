@@ -93,7 +93,7 @@ exports = async function (changeEvent) {
             await transactionsCollection.updateOne(
                 { user_id: userId, transaction_id: tx.transaction_id },
                 {
-                    $set: { ...tx, user_id: userId, plaid_item_id: plaidItem.plaid_item_id, update_from_plaid: true, initial_sync: true },
+                    $set: { ...tx, user_id: userId, plaid_item_id: plaidItem.plaid_item_id, update_from_plaid: true, initial_sync_from_trigger: true },
                     $setOnInsert: { createdAt: new Date() },
                 },
                 { upsert: true }

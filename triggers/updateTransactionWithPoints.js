@@ -50,6 +50,9 @@ exports = async function (changeEvent) {
                 $set: updateAccountPayload
             })
         }
+        if(!pointsResult.user_id){
+            console.log("pointsResult.user_id is not set for transaction: ", transaction.transaction_id);
+        }
         const updatePayload = {
             points: pointsResult.points,
             points_rate: pointsResult.points_rate,
@@ -71,7 +74,7 @@ exports = async function (changeEvent) {
         }, {
             upsert: true
         })
-        
+
         //handle the case where it's a modified transaction with diff points
         const newPoints = pointsResult.points - originalPoints;
         const newSpendAmount = parseFloat(pointsResult.spend_amount) - parseFloat(originalSpendAmount);

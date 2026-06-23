@@ -379,10 +379,12 @@ const syncTransactionsForItem = async (item, user_id, { initialSync = false, max
     console.log("removed: ", stats.removed);
     cursor = data.next_cursor;
 
-    await accountsCollection.updateMany(
-      { plaid_item_id: item.plaid_item_id },
-      { $set: { loading_transactions: false } }
-    );
+    await mongoOperation({
+      operation: "updateMany",
+      collection: "accounts",
+      filter: { plaid_item_id: item.plaid_item_id },
+      payload: { loading_transactions: false },
+    });
 
     if (!data.has_more) {
       await mongoOperation({

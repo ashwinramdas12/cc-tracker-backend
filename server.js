@@ -361,16 +361,17 @@ const syncTransactionsForItem = async (item, user_id, { initialSync = false, max
                 }
             }
         }
-
+        const updatePayload = {};
         if (openedDate) updatePayload.opened_date = openedDate;
         if (nextAnnualFeeDate) updatePayload.next_annual_fee_date = nextAnnualFeeDate;
-
-        await mongoOperation({
-          operation: "updateOne",
-          collection: "accounts",
-          filter: { account_id: accountId },
-          payload: updatePayload,
-        });
+        if (Object.keys(updatePayload).length > 0) {
+          await mongoOperation({
+            operation: "updateOne",
+            collection: "accounts",
+            filter: { account_id: accountId },
+            payload: updatePayload,
+          });
+        }
       }
     }
     console.log("added: ", stats.added);

@@ -270,7 +270,7 @@ const syncTransactionsForItem = async (item, user_id, { initialSync = false, max
         count: transactionsSyncCount,
         options: options,
       });
-      console.log("plaidResponse.data: ", plaidResponse.data);
+      
       data = plaidResponse.data;
     } catch (err) {
       const errCode = err?.response?.data?.error_code;
@@ -300,10 +300,88 @@ const syncTransactionsForItem = async (item, user_id, { initialSync = false, max
       { initialSync, cutoffDate }
     );
 
+    if(initialSync){
+      // Determine opened_date and next_annual_fee_date
+      const accounts = await mongoOperation({
+        operation: "find",
+        collection: "accounts",
+        filter: { plaid_item_id: item.plaid_item_id },
+      });
+      let openedDate = null;
+      let nextAnnualFeeDate = null;
+      const transactionsByAccountId = [...data.added, ...data.modified].reduce((acc, tx) => {
+        (acc[tx.account_id] ??= []).push(tx);
+        return acc;
+      }, {});
+
+      for (const accountId in transactionsByAccountId) {
+        const account = accounts.find(account => account.account_id === accountId);
+        const transactions = transactionsByAccountId[accountId];
+        const card = await mongoOperation({
+          operation: "findOne",
+          collection: "cards",
+          filter: { card_id: account?.card_id },
+        });
+
+        if (card && card.annual_fee && card.annual_fee > 0) {
+            const annualFeeDescription = card.annual_fee_statement_description;
+            const annualFeeTx = transactions.filter(tx => {
+                const name = (tx.name || tx.original_description || '').toLowerCase();
+                return name.includes(annualFeeDescription) && tx.amount > 0;
+            })
+            .sort((a, b) => new Date(a.authorized_datetime) - new Date(b.authorized_datetime))[0];
+
+            if (annualFeeTx) {
+                const feeDate = new Date(annualFeeTx.authorized_datetime || annualFeeTx.date);
+                feeDate.setFullYear(feeDate.getFullYear() - 1);
+                openedDate = feeDate;
+                const next = new Date(feeDate);
+                next.setFullYear(next.getFullYear() + 1);
+                nextAnnualFeeDate = next;
+            }
+        }
+
+        // Fall back to oldest transaction date if no annual fee transaction found
+        if (!openedDate) {
+            const sorted = [...transactions].sort((a, b) => {
+                const da = new Date(a.authorized_datetime || a.date);
+                const db = new Date(b.authorized_datetime || b.date);
+                return da - db;
+            });
+            const oldestDate = new Date(sorted[0].authorized_datetime || sorted[0].date);
+            const twelveMonthsAgo = new Date();
+            twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12);
+
+            if (oldestDate > twelveMonthsAgo) {
+                openedDate = oldestDate;
+                if (card && card.annual_fee && card.annual_fee > 0) {
+                    const next = new Date(oldestDate);
+                    next.setFullYear(next.getFullYear() + 1);
+                    nextAnnualFeeDate = next;
+                }
+            }
+        }
+
+        if (openedDate) updatePayload.opened_date = openedDate;
+        if (nextAnnualFeeDate) updatePayload.next_annual_fee_date = nextAnnualFeeDate;
+
+        await mongoOperation({
+          operation: "updateOne",
+          collection: "accounts",
+          filter: { account_id: accountId },
+          payload: updatePayload,
+        });
+      }
+    }
     console.log("added: ", stats.added);
     console.log("modified: ", stats.modified);
     console.log("removed: ", stats.removed);
     cursor = data.next_cursor;
+
+    await accountsCollection.updateMany(
+      { plaid_item_id: item.plaid_item_id },
+      { $set: { loading_transactions: false } }
+    );
 
     if (!data.has_more) {
       await mongoOperation({
@@ -676,6 +754,7 @@ api.post(
 app.post(
   "/api/plaid/webhook/fQqMLcssXf",
   wrap(async (req, res) => {
+    console.log("plaid webhook req.body: ", req.body);
     const { webhook_type, webhook_code, item_id } = req.body || {};
     if (!webhook_type || !webhook_code || !item_id) {
       return res.status(400).json({ error: "webhook_type, webhook_code, and item_id are required" });
@@ -692,7 +771,7 @@ app.post(
         filter: { plaid_item_id: item_id },
       });
       if (!item) return res.status(404).json({ error: "item not found" });
-
+      
       const itemUserId = item.user_id;
       const isInitialSync = webhook_code === "INITIAL_UPDATE" || webhook_code === "HISTORICAL_UPDATE";
       const maxMonths = webhook_code === "HISTORICAL_UPDATE" ? 15 : null;

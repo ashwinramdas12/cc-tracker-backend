@@ -27,6 +27,29 @@ exports = async function (changeEvent) {
             originalSpendAmount = originalTransaction.amount;
         }
         const pointsResult = await calculatePointsForTransaction(transaction);
+        if(pointsResult.is_annual_fee_transaction){
+            //update the account with the next annual fee date
+            const nextAnnualFeeDate = new Date(transaction.authorized_datetime);
+            nextAnnualFeeDate.setFullYear(nextAnnualFeeDate.getFullYear() + 1);
+            const updateAccountPayload = {
+                next_annual_fee_date: nextAnnualFeeDate
+            }
+            
+            const originalAccount = await accountsCollection.findOne({
+                account_id: accountId
+            });
+            //if no opened date, set it to 2 years ago
+            if(!originalAccount.opened_date){
+                const date = new Date(transaction.authorized_datetime);
+                date.setFullYear(date.getFullYear() - 2);
+                updateAccountPayload.opened_date = date;
+            }
+            await accountsCollection.updateOne({
+                account_id: accountId
+            }, {
+                $set: updateAccountPayload
+            })
+        }
         const updatePayload = {
             points: pointsResult.points,
             points_rate: pointsResult.points_rate,
@@ -48,7 +71,8 @@ exports = async function (changeEvent) {
         }, {
             upsert: true
         })
-
+        
+        //handle the case where it's a modified transaction with diff points
         const newPoints = pointsResult.points - originalPoints;
         const newSpendAmount = parseFloat(pointsResult.spend_amount) - parseFloat(originalSpendAmount);
 
@@ -71,28 +95,6 @@ exports = async function (changeEvent) {
                         [`spend_by_account.${accountId}.points_by_category.${pointsResult.spend_category}`]: newPoints,
                     }
                 }
-            } else if(pointsResult.is_annual_fee_transaction){
-                //update the account with the next annual fee date
-                const nextAnnualFeeDate = new Date(transaction.authorized_datetime);
-                nextAnnualFeeDate.setFullYear(nextAnnualFeeDate.getFullYear() + 1);
-                const updateAccountPayload = {
-                    next_annual_fee_date: nextAnnualFeeDate
-                }
-                
-                const originalAccount = await accountsCollection.findOne({
-                    account_id: accountId
-                });
-                //if no opened date, set it to 2 years ago
-                if(!originalAccount.opened_date){
-                    const date = new Date(transaction.authorized_datetime);
-                    date.setFullYear(date.getFullYear() - 2);
-                    updateAccountPayload.opened_date = date;
-                }
-                await accountsCollection.updateOne({
-                    account_id: accountId
-                }, {
-                    $set: updateAccountPayload
-                })
             } else {
                 if(pointsResult.spend_category && pointsResult.spend_category === "none"){ 
                 } else {

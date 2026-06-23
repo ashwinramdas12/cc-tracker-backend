@@ -155,6 +155,8 @@ const plaidCountryCodes = (process.env.PLAID_COUNTRY_CODES || "US")
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const toIsoDate = (value) => {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -237,7 +239,7 @@ const persistPlaidTransactionRemoved = async (db, removed, user_id) => {
   return deleteResult.deletedCount;
 };
 
-const syncTransactionsForItem = async (item, user_id, { initialSync = false, maxMonths = null } = {}) => {
+const syncTransactionsForItem = async (webhook_code, item, user_id, { initialSync = false, maxMonths = null } = {}) => {
   const mongo = await connectToMongo();
   const db = mongo.db(process.env.DATABASE_NAME);
 
@@ -300,7 +302,12 @@ const syncTransactionsForItem = async (item, user_id, { initialSync = false, max
       { initialSync, cutoffDate }
     );
 
-    if(initialSync){
+    const oneAccount = await mongoOperation({
+      operation: "findOne",
+      collection: "accounts",
+      filter: { plaid_item_id: item.plaid_item_id },
+    });
+    if(oneAccount.loading_transactions && webhook_code === "SYNC_UPDATES_AVAILABLE"){
       // Determine opened_date and next_annual_fee_date
       const accounts = await mongoOperation({
         operation: "find",
@@ -379,12 +386,14 @@ const syncTransactionsForItem = async (item, user_id, { initialSync = false, max
     console.log("removed: ", stats.removed);
     cursor = data.next_cursor;
 
-    await mongoOperation({
-      operation: "updateMany",
-      collection: "accounts",
-      filter: { plaid_item_id: item.plaid_item_id },
-      payload: { loading_transactions: false },
-    });
+    if(webhook_code === "SYNC_UPDATES_AVAILABLE"){
+      await mongoOperation({
+        operation: "updateMany",
+        collection: "accounts",
+        filter: { plaid_item_id: item.plaid_item_id },
+        payload: { loading_transactions: false },
+      });
+    }
 
     if (!data.has_more) {
       await mongoOperation({
@@ -766,6 +775,7 @@ app.post(
     const SYNC_CODES = ["SYNC_UPDATES_AVAILABLE", "INITIAL_UPDATE", "HISTORICAL_UPDATE"];
 
     if (SYNC_CODES.includes(webhook_code)) {
+      await delay(10_000);
       console.log("webhook_code: ", webhook_code);
       console.log("item_id: ", item_id);
       const item = await mongoOperation({
@@ -779,7 +789,7 @@ app.post(
       const isInitialSync = webhook_code === "INITIAL_UPDATE" || webhook_code === "HISTORICAL_UPDATE";
       const maxMonths = webhook_code === "HISTORICAL_UPDATE" ? 15 : null;
 
-      const stats = await syncTransactionsForItem(item, itemUserId, { initialSync: isInitialSync, maxMonths });
+      const stats = await syncTransactionsForItem(webhook_code, item, itemUserId, { initialSync: isInitialSync, maxMonths });
       console.log(`${webhook_code} sync complete for item ${item_id}:`, stats);
 
       return res.json({ webhook_code, item_id, user_id: itemUserId, stats });

@@ -35,6 +35,9 @@ async function calculatePointsForTransaction(transaction) {
     let exceededSpendLimit = false;
     let spendOverCap = 0;
     let overagePointsRate = 0;
+
+    const nonApplicableTransactions = ["BANK_FEES","TRANSFER_OUT","LOAN_DISBURSEMENTS","LOAN_PAYMENTS"]
+
     try {
         const now = new Date(transaction.authorized_datetime);
         const thisYear = now.getFullYear().toString();
@@ -531,6 +534,23 @@ async function calculatePointsForTransaction(transaction) {
         //CHECK IF THERE'S A BONUS REWARD
         const bonusRewardCheck = await checkForBonusReward(user.user_id, accountId, bonusReward, spendCategory, spendAmount, now);
         await mongo.close();
+
+        //Check if transaction is applicable
+        if(nonApplicableTransactions.find(transaction => plaidSpendCategory.includes(transaction))){
+            return {
+                success: true,
+                transaction_id: transaction.transaction_id,
+                points: 0,
+                points_rate: 0,
+                overage_points_rate: 0,
+                spend_over_cap: 0,
+                spend_amount: spendAmount,
+                spend_category: spendCategory,
+                reward_id: "none", 
+                user_id: user.user_id,
+                is_non_applicable_transaction: true,
+            }
+        }
         return {
             success: true,
             transaction_id: transaction.transaction_id,

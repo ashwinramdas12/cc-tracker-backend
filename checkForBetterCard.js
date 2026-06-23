@@ -34,12 +34,21 @@ async function checkForBetterCard(transaction) {
         const theseQuarters = Object.values(quarters).map(quarter => quarter.map(month => `${month} ${now.getFullYear()}`));
         const theseHalves = Object.values(halves).map(half => half.map(month => `${month} ${now.getFullYear()}`));
         const thisYear = now.getFullYear().toString();
-        const currentReward = await rewardsCollection.findOne({ reward_id: rewardId });
+        let currentReward = await rewardsCollection.findOne({ reward_id: rewardId });
+        if(!currentReward){
+            currentReward={
+                type:"base",
+                rate:transaction.points_rate
+            }
+        }
         if(currentReward.type === 'credit'){
             return null;
         }
         const categoryRewards = await rewardsCollection.find({ reward_id: {$ne: rewardId}, card_id: {$in: cards.map(card => card.card_id) }, plaid_categories: plaidCategory });
-        const merchantRewards = await rewardsCollection.find({ reward_id: {$ne: rewardId}, card_id: {$in: cards.map(card => card.card_id) }, merchants: merchant });
+        let merchantRewards = [];
+        if(merchant){
+            merchantRewards = await rewardsCollection.find({ reward_id: {$ne: rewardId}, card_id: {$in: cards.map(card => card.card_id) }, merchants: merchant });
+        }
         let betterCardReward = currentReward;
         for(const categoryReward of categoryRewards){
             if(categoryReward.type === 'credit'){
@@ -108,9 +117,13 @@ async function checkForBetterCard(transaction) {
                 }
             }
         }
+        if(betterCardReward.card_id === currentReward.card_id){
+            return null;
+        }
         return betterCardReward.card_id;
     } catch(err) {
         console.log("error checking for better card: ", err.message);
+        return null;
     }
 }
 

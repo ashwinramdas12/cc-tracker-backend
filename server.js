@@ -548,6 +548,9 @@ api.post(
       user: { client_user_id: user_id },
       client_name: process.env.PLAID_CLIENT_NAME || "PointGod",
       products: plaidProducts,
+      transactions: {
+        days_requested: 730
+      },
       country_codes: plaidCountryCodes,
       webhook: process.env.ENDPOINT_BASE + '/api/plaid/webhook/fQqMLcssXf',
       language: "en",
@@ -580,7 +583,6 @@ api.post(
     const plaidItemId = exchange.data.item_id;
     
     const accountsResponse = await plaidClient.accountsGet({ access_token: accessToken });
-    console.log("accountsResponse: ", accountsResponse.data);
     const plaidAccounts = accountsResponse.data.accounts || [];
     console.log("plaidAccounts: ", plaidAccounts);
     const plaidItem = accountsResponse.data.item || {};

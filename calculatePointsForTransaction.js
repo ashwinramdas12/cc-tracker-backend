@@ -97,7 +97,7 @@ async function calculatePointsForTransaction(transaction) {
         }
         console.log("spendAmount: ", spendAmount);
         if(spendAmount < 0){
-            if("LOAN_DISBURSEMENTS" in plaidSpendCategory || "INCOME" in plaidSpendCategory || "LOAN_PAYMENTS" in plaidSpendCategory || "TRANSFER_IN" in plaidSpendCategory){
+            if(plaidSpendCategory.includes("LOAN_DISBURSEMENTS") || plaidSpendCategory.includes("INCOME") || plaidSpendCategory.includes("LOAN_PAYMENTS") || plaidSpendCategory.includes("TRANSFER_IN")){
                 return {
                     success: true,
                     transaction_id: transaction.transaction_id,

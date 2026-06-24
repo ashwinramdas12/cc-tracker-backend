@@ -775,10 +775,10 @@ app.post(
       return res.status(400).json({ error: "webhook_type, webhook_code, and item_id are required" });
     }
 
-    const SYNC_CODES = ["SYNC_UPDATES_AVAILABLE", "INITIAL_UPDATE", "HISTORICAL_UPDATE"];
+    const SYNC_CODES = ["SYNC_UPDATES_AVAILABLE"];
 
     if (SYNC_CODES.includes(webhook_code)) {
-      await delay(10_000);
+      // await delay(10_000);
       console.log("webhook_code: ", webhook_code);
       console.log("item_id: ", item_id);
       const item = await mongoOperation({

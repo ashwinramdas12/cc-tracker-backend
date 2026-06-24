@@ -775,7 +775,7 @@ app.post(
       return res.status(400).json({ error: "webhook_type, webhook_code, and item_id are required" });
     }
 
-    const SYNC_CODES = ["SYNC_UPDATES_AVAILABLE"];
+    const SYNC_CODES = ["SYNC_UPDATES_AVAILABLE", "INITIAL_UPDATE", "HISTORICAL_UPDATE"];
 
     if (SYNC_CODES.includes(webhook_code)) {
       // await delay(10_000);

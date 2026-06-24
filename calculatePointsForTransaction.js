@@ -567,7 +567,9 @@ async function calculatePointsForTransaction(transaction) {
         }
         
     } catch(err) {
+        
         console.log("error updating transaction with points: ", err.message);
+        throw err;
         return {
             error: err.message,
         };

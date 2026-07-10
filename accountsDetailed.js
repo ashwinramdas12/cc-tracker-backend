@@ -90,6 +90,60 @@ const getMonthYearLabelsForYearView = (yearNum, capField) => {
     return allMonthYearLabelsInYear(yearNum);
 };
 
+/**
+ * For account_open_date annual rewards: returns month_year labels from the most
+ * recent anniversary of `openedDate` that falls on or before `anchorMonthYear`,
+ * through `anchorMonthYear` inclusive.
+ *
+ * E.g. openedDate = March 2022, anchor = "June 2026"
+ *   → window start = March 2026  → ["March 2026", "April 2026", "May 2026", "June 2026"]
+ *
+ * E.g. openedDate = March 2022, anchor = "February 2026"
+ *   → window start = March 2025  → ["March 2025", ..., "February 2026"]
+ */
+const getMonthYearLabelsForAccountOpenDateWindow = (openedDate, anchorMonthYear) => {
+    const raw = openedDate?.$date ?? openedDate;
+    const opened = raw instanceof Date ? raw : new Date(raw);
+    if (!opened || isNaN(opened.getTime())) return [];
+
+    const anchor = parseMonthYear(anchorMonthYear);
+    if (!anchor) return [];
+
+    // 0-indexed month the account was opened (the anniversary month)
+    const anniversaryMonth = opened.getMonth();
+
+    // Find the year of the most recent anniversary that is <= anchor
+    let anniversaryYear = anchor.getFullYear();
+    if (anniversaryMonth > anchor.getMonth()) {
+        // This year's anniversary is still in the future relative to anchor
+        anniversaryYear -= 1;
+    }
+
+    const windowStart = new Date(anniversaryYear, anniversaryMonth, 1);
+    const windowEnd   = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+
+    const labels = [];
+    let current = windowStart;
+    while (current <= windowEnd) {
+        labels.push(monthYearLabel(current));
+        current = new Date(current.getFullYear(), current.getMonth() + 1, 1);
+    }
+    return labels;
+};
+
+/**
+ * For year-view + account_open_date: the end anchor is the lesser of
+ * "December of yearNum" and "the current calendar month", so we never
+ * sum months that haven't happened yet.
+ */
+const getYearViewEndAnchor = (yearNum) => {
+    const now = new Date();
+    if (yearNum >= now.getFullYear()) {
+        return monthYearLabel(now);
+    }
+    return `December ${yearNum}`;
+};
+
 /** Inclusive month_year labels from reward start through end ("May 2026" format). */
 const getMonthYearLabelsForRewardWindow = (startDate, endDate, referenceDate = new Date()) => {
     if (!startDate && !endDate) {
@@ -174,7 +228,13 @@ const attachCreditMerchantSpend = async (db, accounts, { user_id, month_year, ye
         return byCard;
     }, {});
 
-    const spendSummaryDocs = await db
+    // account_open_date windows can span into the previous year (e.g. March 2025 – Feb 2026
+    // when viewing Feb 2026). Fetch the previous year's docs too when any such reward exists.
+    const hasAccountOpenDateReward = creditRewards.some(
+        (r) => r.spend_cap_annual != null && r.renewal_date_type === "account_open_date"
+    );
+
+    let spendSummaryDocs = await db
         .collection("spend_summaries")
         .find({
             user_id,
@@ -182,7 +242,16 @@ const attachCreditMerchantSpend = async (db, accounts, { user_id, month_year, ye
         })
         .toArray();
 
-    
+    if (hasAccountOpenDateReward) {
+        const prevYearDocs = await db
+            .collection("spend_summaries")
+            .find({
+                user_id,
+                month_year: { $regex: ` ${yearNum - 1}$` },
+            })
+            .toArray();
+        spendSummaryDocs = [...spendSummaryDocs, ...prevYearDocs];
+    }
 
     return accounts.map((account) => {
         const cardRewards = rewardsByCardId[account.card_id] || [];
@@ -192,9 +261,27 @@ const attachCreditMerchantSpend = async (db, accounts, { user_id, month_year, ye
             const capField = getActiveCapField(reward, hasYear);
             if (!capField || !Array.isArray(reward.merchants)) continue;
 
-            const monthYearLabels = hasYear
-                ? getMonthYearLabelsForYearView(yearNum, capField)
-                : getMonthYearLabelsForCap(anchorMonthYear, capField);
+            let monthYearLabels;
+            const isAccountOpenDate =
+                capField === "spend_cap_annual" &&
+                (reward.renewal_date_type === "account_open_date") &&
+                account.opened_date;
+
+            if (isAccountOpenDate) {
+                // For year view, anchor to current month (not December) so future months are excluded.
+                // For month view, anchor to the requested month.
+                const anchor = hasYear
+                    ? getYearViewEndAnchor(yearNum)
+                    : anchorMonthYear;
+                monthYearLabels = getMonthYearLabelsForAccountOpenDateWindow(
+                    account.opened_date,
+                    anchor
+                );
+            } else {
+                monthYearLabels = hasYear
+                    ? getMonthYearLabelsForYearView(yearNum, capField)
+                    : getMonthYearLabelsForCap(anchorMonthYear, capField);
+            }
 
             for (const merchant of reward.merchants) {
                 if (!merchant) continue;
@@ -210,7 +297,7 @@ const attachCreditMerchantSpend = async (db, accounts, { user_id, month_year, ye
                 if (!monthYearLabels.includes(doc.month_year)) return total;
                 const bucket = doc.spend_by_account?.[account.account_id];
                 if (!bucket?.credits_by_category) return total;
-                return total + (bucket.credits_by_category[reward.reward_id] || 0);   
+                return total + (bucket.credits_by_category[reward.reward_id] || 0);
             }, 0);
         }
 

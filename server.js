@@ -650,6 +650,13 @@ api.post(
       ...(process.env.PLAID_REDIRECT_URI ? { redirect_uri: process.env.PLAID_REDIRECT_URI } : {}),
     });
 
+    await mongoOperation({
+      operation: "updateOne",
+      collection: "users",
+      filter: { user_id },
+      payload: { plaid_user_id: linkResponse.data.user_id },
+    });
+
     return res.json({
       link_token: linkResponse.data.link_token,
       expiration: linkResponse.data.expiration,

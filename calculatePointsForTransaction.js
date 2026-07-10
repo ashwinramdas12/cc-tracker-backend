@@ -65,13 +65,18 @@ async function calculatePointsForTransaction(transaction) {
 
         //ADD LOGIC HERE TO SEE IF THIS IS A REBATABLE TRANSACTION 
         const transactionDescription = transaction.original_description;
-        const creditReward = await rewardsCollection.findOne({
+        const cardCreditRewards = await rewardsCollection.find({
             card_id: card.card_id,
-            description_on_statement: transactionDescription,
-        });
+            description_on_statement: { $nin: [null, ''] },
+        }).toArray();
+        const normalizedTxDesc = transactionDescription?.toLowerCase() ?? '';
+        const creditReward = cardCreditRewards.find((r) => {
+            const stored = r.description_on_statement.toLowerCase();
+            return normalizedTxDesc.includes(stored) || stored.includes(normalizedTxDesc);
+        }) ?? null;
         console.log("creditReward: ", creditReward);
         //IF CREDIT REWARD IS FOUND, THEN THIS MEANS THEY GOT MONEY BACK AUTOMATICALLY ON THEIR STATEMENT, SO NOT EARNING POINTS BUT MAY EVEN DEDUCT POINTS
-        if(creditReward){
+        if(creditReward && spendAmount < 0){
             if(creditReward.deducts_from_points){
                 pointsRate = creditReward.rate;
                 points = spendAmount * pointsRate
@@ -207,7 +212,7 @@ async function calculatePointsForTransaction(transaction) {
             if(!userActivated){
                 merchantReward = await rewardsCollection.findOne({ 
                     card_id: card.card_id,
-                    merchants: merchant, 
+                    merchants: { $regex: merchant, $options: 'i' }, 
                     type:{$ne:"bonus"},
                     activation_required: false,
                     $or:[

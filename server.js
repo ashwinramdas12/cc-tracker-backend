@@ -19,6 +19,7 @@ const { searchRewards } = require("./searchRewards");
 const { searchSpendCategories } = require("./searchSpendCategories");
 const { searchTransferPartners } = require("./searchTransferPartners");
 const { searchIssuers } = require("./searchIssuers");
+const { sendEmail } = require("./notifications/sendEmail");
 const {
   createAndEmailVerificationCode,
   verifyCodeForUser,
@@ -1089,10 +1090,13 @@ api.post("/cards/best", wrap(async (req, res) => {
   const mongo = await connectToMongo();
   const db = mongo.db(process.env.DATABASE_NAME);
 
-  const [allCards, allRewards, allIssuers] = await Promise.all([
-    db.collection("cards").find({ active: true, card_id: { $nin: existing_cards.length > 0 ? existing_cards : [] } }).toArray(),
+  const existingCardIds = existing_cards?.length > 0 ? existing_cards : [];
+
+  const [allCards, allRewards, allIssuers, existingCards] = await Promise.all([
+    db.collection("cards").find({ active: true, card_id: { $nin: existingCardIds } }).toArray(),
     db.collection("rewards").find({ category:{$regex: category} }).toArray(),
     db.collection("issuers").find({}).toArray(),
+    db.collection("cards").find({ card_id: { $in: existingCardIds } }).toArray(),
   ]);
 
   const issuerByIssuerId = Object.fromEntries(allIssuers.map((i) => [i.issuer_id, i]));
@@ -1104,6 +1108,17 @@ api.post("/cards/best", wrap(async (req, res) => {
     return acc;
   }, {});
 
+  // Inject a synthetic base reward representing each card's fallback default_point_rate
+  for (const card of [...allCards, ...existingCards]) {
+    if (!rewardsByCardId[card.card_id]) rewardsByCardId[card.card_id] = [];
+    rewardsByCardId[card.card_id].push({
+      card_id: card.card_id,
+      reward_id: "default",
+      type: "base",
+      rate: card.default_point_rate ?? 1,
+    });
+  }
+  console.log("rewardsByCardId", rewardsByCardId['card_amex_gold']);
   // Annualise a credit reward's spend cap value
   const annualisedCreditValue = (reward) => {
     if (reward.spend_cap_annual != null) return reward.spend_cap_annual;
@@ -1113,10 +1128,8 @@ api.post("/cards/best", wrap(async (req, res) => {
     return 0;
   };
 
-  const scored = Object.entries(rewardsByCardId).map(([cardId, rewards]) => {
-    const card = cardById[cardId];
-    if (!card) return null;
-
+  // Estimate annual cash earn for a card given its rewards for this category
+  const scoreCard = (card, rewards = []) => {
     const issuer = issuerByIssuerId[card.issuer_id] ?? {};
     const pointValueCents = issuer.point_value_cents ?? 1;
 
@@ -1145,9 +1158,35 @@ api.post("/cards/best", wrap(async (req, res) => {
     const cashFromPoints = baseReward
       ? (category_spend * (baseReward.rate ?? 0) * pointValueCents) / 100
       : 0;
-    const estimatedCashEarn = cashFromPoints + cashFromCredits;
 
-    return { cardId, card, estimatedCashEarn, baseReward, creditRewards: stackedCreditRewards };
+    return {
+      estimatedCashEarn: cashFromPoints + cashFromCredits,
+      baseReward,
+      creditRewards: stackedCreditRewards,
+    };
+  };
+
+  // Best estimated earn among the cards the user already holds
+  const bestExisting = existingCards.reduce((best, card) => {
+    const { estimatedCashEarn } = scoreCard(card, rewardsByCardId[card.card_id]);
+    return estimatedCashEarn > best.score ? { score: estimatedCashEarn, card } : best;
+  }, { score: 0, card: null });
+  const bestExistingCashEarn = bestExisting.score;
+
+  const scored = Object.entries(rewardsByCardId).map(([cardId, rewards]) => {
+    const card = cardById[cardId];
+    if (!card) return null;
+
+    const { estimatedCashEarn, baseReward, creditRewards } = scoreCard(card, rewards);
+
+    return {
+      cardId,
+      card,
+      estimatedCashEarn,
+      baseReward,
+      creditRewards,
+      betterThanExistingCards: estimatedCashEarn > bestExistingCashEarn,
+    };
   }).filter(Boolean);
 
   // Cards with both a base reward + credit rewards rank highest, then sort by estimated cash
@@ -1159,16 +1198,26 @@ api.post("/cards/best", wrap(async (req, res) => {
   });
 
   const result = {};
-  scored.slice(0, 5).forEach(({ cardId, card, estimatedCashEarn }, idx) => {
+  scored.slice(0, 5).forEach(({ cardId, card, estimatedCashEarn, betterThanExistingCards }, idx) => {
     const { _id, ...cardWithoutId } = card;
     result[cardId] = {
       card_rank: idx + 1,
       estimated_cash_earn: `$${estimatedCashEarn.toFixed(2)}`,
+      better_than_existing_cards: betterThanExistingCards,
       card: cardWithoutId,
     };
   });
 
-  return res.json(result);
+  let bestExistingCard = null;
+  if (bestExisting.card) {
+    const { _id, ...cardWithoutId } = bestExisting.card;
+    bestExistingCard = {
+      estimated_cash_earn: `$${bestExistingCashEarn.toFixed(2)}`,
+      card: cardWithoutId,
+    };
+  }
+
+  return res.json({ bestCards: result, bestExistingCashEarn, bestExistingCard });
 }));
 
 /* ---------- Plaid Item removal ---------- */
@@ -1203,6 +1252,155 @@ api.delete(
     });
 
     return res.json({ success: true, plaid_item_id });
+  })
+);
+
+/* -------------------------------------------------------------------------- */
+/*  Transaction issue reports                                                 */
+/* -------------------------------------------------------------------------- */
+
+api.post(
+  '/report-transaction-issue',
+  wrap(async (req, res) => {
+    const { transaction_id, user_id, message } = req.body || {};
+    if (!transaction_id || !user_id || !message) {
+      return res
+        .status(400)
+        .json({ error: 'transaction_id, user_id, and message are required' });
+    }
+
+    const escapeHtml = (value) =>
+      String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    const body = `
+      <p><strong>Transaction ID:</strong> ${escapeHtml(transaction_id)}</p>
+      <p><strong>User ID:</strong> ${escapeHtml(user_id)}</p>
+      <p><strong>Message:</strong></p>
+      <p>${escapeHtml(message).replace(/\n/g, '<br>')}</p>
+    `;
+
+    await sendEmail({
+      to: 'pointgod.app@gmail.com',
+      subject: 'Transaction issue report',
+      body,
+    });
+
+    return res.json({ success: true });
+  })
+);
+
+/* -------------------------------------------------------------------------- */
+/*  Transaction deletion (super_owner only)                                   */
+/* -------------------------------------------------------------------------- */
+
+const monthYearFromDate = (dateInput) => {
+  const months = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ];
+  const date = new Date(dateInput);
+  return `${months[date.getMonth()]} ${date.getFullYear()}`;
+};
+
+// Build a negated $inc mirroring how the transaction was originally added to the
+// spend summary in the updateTransactionWithPoints trigger.
+const buildSpendSummaryReversal = (transaction, thisReward) => {
+  const accountId = transaction.account_id;
+  const category = transaction.category;
+  const merchant = transaction.merchant_name;
+  const amount = Number(transaction.amount) || 0;
+  const points = Number(transaction.points) || 0;
+  const base = `spend_by_account.${accountId}`;
+  const inc = {};
+  console.log("amount, points", amount, points);
+  if (transaction.is_credit_transaction) {
+    if (thisReward?.merchants?.some(m => transaction.merchant_name.toLowerCase().includes(m.toLowerCase()))) {
+      inc[`${base}.spend_by_merchant.${merchant}`] = -amount;
+      inc[`${base}.spend_by_category.${category}`] = -amount;
+      inc[`${base}.points_by_merchant.${merchant}`] = -points;
+      inc[`${base}.points_by_category.${category}`] = -points;
+      inc[`${base}.credits_by_merchant.${merchant}`] = -amount;
+    } else {
+      inc[`${base}.spend_by_merchant.${merchant}`] = -amount;
+      inc[`${base}.spend_by_category.${category}`] = -amount;
+      inc[`${base}.credits_by_category.${transaction.reward_id}`] = -amount;
+      inc[`${base}.points_by_merchant.${merchant}`] = -points;
+      inc[`${base}.points_by_category.${category}`] = -points;
+    }
+  } else if (category && category !== 'none') {
+      inc[`${base}.spend_by_merchant.${merchant}`] = -amount;
+      inc[`${base}.spend_by_category.${category}`] = -amount;
+      inc[`${base}.points_by_category.${category}`] = -points;
+      inc[`${base}.points_by_merchant.${merchant}`] = -points;
+  }
+
+  return inc;
+};
+
+api.post(
+  '/transactions/archive',
+  wrap(async (req, res) => {
+    const { transaction_id, requesting_user_id } = req.body || {};
+    if (!transaction_id || !requesting_user_id) {
+      return res
+        .status(400)
+        .json({ error: 'transaction_id and requesting_user_id are required' });
+    }
+
+    const mongo = await connectToMongo();
+    const db = mongo.db(process.env.DATABASE_NAME);
+
+    // Only super_owner users may delete transactions
+    const requestingUser = await db
+      .collection('users')
+      .findOne({ user_id: requesting_user_id });
+    if (!requestingUser || requestingUser.role !== 'super_owner') {
+      return res.status(403).json({ error: 'Not authorized to delete transactions' });
+    }
+
+    const transaction = await db
+      .collection('transactions')
+      .findOne({ transaction_id });
+    if (!transaction) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+
+    // Reverse the transaction's contribution to the spend summary. The trigger
+    // only writes to the summary when points were earned (points > 0), so we
+    // only reverse in that case to stay consistent.
+    if ((Number(transaction.points) || 0) > 0) {
+      const reward = await db
+        .collection('rewards')
+        .findOne({ reward_id: transaction.reward_id });
+
+      const inc = buildSpendSummaryReversal(transaction, reward);
+      if (Object.keys(inc).length > 0) {
+        const monthYear = monthYearFromDate(
+          transaction.authorized_datetime ??
+            transaction.authorized_date ??
+            transaction.datetime ??
+            transaction.date
+        );
+        await db.collection('spend_summaries').updateOne(
+          { user_id: transaction.user_id, month_year: monthYear },
+          { $inc: inc }
+        );
+      }
+    }
+
+    // Archive then delete
+    await db.collection('archived_transactions').insertOne({
+      ...transaction,
+      archived_at: new Date(),
+      archived_by: requesting_user_id,
+    });
+
+    await db.collection('transactions').deleteOne({ transaction_id });
+
+    return res.json({ success: true, transaction_id });
   })
 );
 

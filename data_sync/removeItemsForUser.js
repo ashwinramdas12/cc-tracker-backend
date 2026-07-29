@@ -35,30 +35,30 @@ const plaidClient = new PlaidApi(
         console.log('');
     }
 
-    // const toRemove = items.filter((item) => item.plaid_item_id !== KEEP_ITEM_ID);
+    const toRemove = items.filter((item) => item.plaid_item_id !== KEEP_ITEM_ID);
 
-    // if (toRemove.length === 0) {
-    //     console.log('Nothing to remove.');
-    //     await closeMongo();
-    //     return;
-    // }
+    if (toRemove.length === 0) {
+        console.log('Nothing to remove.');
+        await closeMongo();
+        return;
+    }
 
-    // console.log(`Removing ${toRemove.length} item(s)...\n`);
+    console.log(`Removing ${toRemove.length} item(s)...\n`);
 
-    // for (const item of toRemove) {
-    //     try {
-    //         await plaidClient.itemRemove({ access_token: item.access_token });
-    //         console.log(`  ✓ Removed from Plaid: ${item.plaid_item_id}`);
+    for (const item of toRemove) {
+        try {
+            await plaidClient.itemRemove({ access_token: item.access_token });
+            console.log(`  ✓ Removed from Plaid: ${item.plaid_item_id}`);
 
-    //         await db.collection('plaid_items').deleteOne({ plaid_item_id: item.plaid_item_id });
-    //         console.log(`  ✓ Deleted from plaid_items collection`);
+            await db.collection('plaid_items').deleteOne({ plaid_item_id: item.plaid_item_id });
+            console.log(`  ✓ Deleted from plaid_items collection`);
 
-    //         const { deletedCount } = await db.collection('accounts').deleteMany({ plaid_item_id: item.plaid_item_id });
-    //         console.log(`  ✓ Deleted ${deletedCount} associated account(s)\n`);
-    //     } catch (err) {
-    //         console.error(`  ✗ Failed to remove ${item.plaid_item_id}:`, err?.response?.data ?? err.message);
-    //     }
-    // }
+            const { deletedCount } = await db.collection('accounts').deleteMany({ plaid_item_id: item.plaid_item_id });
+            console.log(`  ✓ Deleted ${deletedCount} associated account(s)\n`);
+        } catch (err) {
+            console.error(`  ✗ Failed to remove ${item.plaid_item_id}:`, err?.response?.data ?? err.message);
+        }
+    }
 
     await closeMongo();
     console.log('Done.');

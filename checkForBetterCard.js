@@ -17,8 +17,8 @@ async function checkForBetterCard(transaction) {
         const plaidCategory = transaction.personal_finance_category.detailed;
         const account = await accountsCollection.findOne({ account_id: accountId });
         const user = await usersCollection.findOne({ user_id: account.user_id });
-        const userAccounts = await accountsCollection.find({ user_id: user.user_id });
-        const cards = await cardsCollection.find({ card_id: {$in: userAccounts.map(account => account.card_id) } });
+        const userAccounts = await accountsCollection.find({ user_id: user.user_id }).toArray();
+        const cards = await cardsCollection.find({ card_id: {$in: userAccounts.map(account => account.card_id) } }).toArray();
         const now = new Date();
         const thisMonthYear = now.toLocaleString('default', { month: 'long', year: 'numeric' });
         const quarters = {
@@ -37,38 +37,43 @@ async function checkForBetterCard(transaction) {
         let currentReward = await rewardsCollection.findOne({ reward_id: rewardId });
         if(!currentReward){
             currentReward={
-                type:"base",
-                rate:transaction.points_rate
+            type:"base",
+            rate:transaction.points_rate
             }
         }
         if(currentReward.type === 'credit'){
             return null;
         }
-        const categoryRewards = await rewardsCollection.find({ reward_id: {$ne: rewardId}, card_id: {$in: cards.map(card => card.card_id) }, plaid_categories: plaidCategory });
+        const categoryRewards = await rewardsCollection.find({ reward_id: {$ne: rewardId}, card_id: {$in: cards.map(card => card.card_id) }, plaid_categories: plaidCategory }).toArray();
         let merchantRewards = [];
         if(merchant){
-            merchantRewards = await rewardsCollection.find({ reward_id: {$ne: rewardId}, card_id: {$in: cards.map(card => card.card_id) }, merchants: merchant });
+            merchantRewards = await rewardsCollection.find({ reward_id: {$ne: rewardId}, card_id: {$in: cards.map(card => card.card_id) }, merchants: merchant }).toArray();
         }
         let betterCardReward = currentReward;
         for(const categoryReward of categoryRewards){
             if(categoryReward.type === 'credit'){
+                if(categoryReward.merchants.length>0){
+                    if(!categoryReward.merchants.some(m => merchant.toLowerCase().includes(m.toLowerCase()))){
+                        continue;
+                    }
+                }
                 const spendCapFrequency = categoryReward.spend_cap_monthly ? "monthly" : categoryReward.spend_cap_quarterly ? "quarterly" : categoryReward.spend_cap_biannual ? "biannual" : "annual";
                 let currentSpend = 0;
                 if(spendCapFrequency === "monthly"){
                     currentSpend = await spendSummariesCollection.findOne({ user_id: user.user_id, month_year: { $regex: ` ${thisMonthYear}$` } });
                     currentSpend = currentSpend.spend_by_account[accountId]?.spend_by_category[categoryReward.plaid_categories] || 0;
                 } else if(spendCapFrequency === "quarterly"){
-                    currentSpend = await spendSummariesCollection.find({ user_id: user.user_id, month_year: { $in: theseQuarters } });
+                    currentSpend = await spendSummariesCollection.find({ user_id: user.user_id, month_year: { $in: theseQuarters } }).toArray();
                     currentSpend = currentSpend.reduce((acc, summary) => {
                         return acc + summary.spend_by_account[accountId]?.spend_by_category[categoryReward.plaid_categories] || 0;
                     },0);
                 } else if(spendCapFrequency === "biannual"){
-                    currentSpend = await spendSummariesCollection.find({ user_id: user.user_id, month_year: { $in: theseHalves } });
+                    currentSpend = await spendSummariesCollection.find({ user_id: user.user_id, month_year: { $in: theseHalves } }).toArray();
                     currentSpend = currentSpend.reduce((acc, summary) => {
                         return acc + summary.spend_by_account[accountId]?.spend_by_category[categoryReward.plaid_categories] || 0;
                     },0);
                 } else if(spendCapFrequency === "annual"){
-                    currentSpend = await spendSummariesCollection.find({ user_id: user.user_id, month_year: { $regex: ` ${thisYear}$` } });
+                    currentSpend = await spendSummariesCollection.find({ user_id: user.user_id, month_year: { $regex: ` ${thisYear}$` } }).toArray();
                     currentSpend = currentSpend.reduce((acc, summary) => {
                         return acc + summary.spend_by_account[accountId]?.spend_by_category[categoryReward.plaid_categories] || 0;
                     },0);
@@ -91,17 +96,17 @@ async function checkForBetterCard(transaction) {
                     currentSpend = await spendSummariesCollection.findOne({ user_id: user.user_id, month_year: { $regex: ` ${thisMonthYear}$` } });
                     currentSpend = currentSpend.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0;
                 } else if(spendCapFrequency === "quarterly"){
-                    currentSpend = await spendSummariesCollection.find({ user_id: user.user_id, month_year: { $in: theseQuarters } });
+                    currentSpend = await spendSummariesCollection.find({ user_id: user.user_id, month_year: { $in: theseQuarters } }).toArray();
                     currentSpend = currentSpend.reduce((acc, summary) => {
                         return acc + summary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0;
                     },0);
                 } else if(spendCapFrequency === "biannual"){
-                    currentSpend = await spendSummariesCollection.find({ user_id: user.user_id, month_year: { $in: theseHalves } });
+                    currentSpend = await spendSummariesCollection.find({ user_id: user.user_id, month_year: { $in: theseHalves } }).toArray();
                     currentSpend = currentSpend.reduce((acc, summary) => {
                         return acc + summary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0;
                     },0);
                 } else if(spendCapFrequency === "annual"){
-                    currentSpend = await spendSummariesCollection.find({ user_id: user.user_id, month_year: { $regex: ` ${thisYear}$` } });
+                    currentSpend = await spendSummariesCollection.find({ user_id: user.user_id, month_year: { $regex: ` ${thisYear}$` } }).toArray();
                     currentSpend = currentSpend.reduce((acc, summary) => {
                         return acc + summary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0;
                     },0);

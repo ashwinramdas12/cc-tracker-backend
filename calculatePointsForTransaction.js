@@ -3,6 +3,9 @@ const { connectToMongo, closeMongo } = require('./connectToMongo');
 const { buildRewardWindowMonthYearFilter } = require('./accountsDetailed');
 const { formatMonthYear } = require('./utility');
 const checkForBonusReward = require('./checkForBonusReward');
+
+// Escape regex metacharacters so merchant names can be used safely in $regex
+const escapeRegex = (value) => String(value ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 //TO DO:
 // IDENTIFY CREDITS, SHOULD WE ADD TO SPEND SUMMARY?
 // NEED TO TAG WITH UNCLASSIFIED IF WE CANT PROPERLY CATEGORIZE THE TRANSACTION
@@ -39,11 +42,10 @@ async function calculatePointsForTransaction(transaction) {
     const nonApplicableTransactions = ["BANK_FEES","TRANSFER_OUT","LOAN_DISBURSEMENTS","LOAN_PAYMENTS"]
 
     try {
-        const now = new Date(transaction.authorized_datetime);
+        const now = new Date(transaction.authorized_datetime.valueOf());
         const thisYear = now.getFullYear().toString();
         console.log("thisYear: ", thisYear);
-        const monthYear = formatMonthYear(now);
-        console.log("monthYear: ", monthYear);
+        const monthYear = context.functions.execute("formatMonthYear",now);
         const quarter = Math.ceil(now.getMonth() / 3);
         const half = Math.ceil(now.getMonth() / 6);
         const accountId = transaction.account_id;
@@ -53,7 +55,9 @@ async function calculatePointsForTransaction(transaction) {
         const card = await cardsCollection.findOne({ card_id: account.card_id });
         overagePointsRate = card.default_point_rate;
         const spendAmount = transaction.amount;
-        const merchant = transaction.merchant_name
+        const safeKey = (s) => String(s ?? '').replace(/\./g, '');
+        const merchant = transaction.merchant_name ? safeKey(transaction.merchant_name): safeKey(transaction.original_description)
+        console.log("merchant", merchant)
         const plaidSpendCategory = transaction.personal_finance_category.detailed;
         console.log("plaidSpendCategory: ", plaidSpendCategory);
         var spendCategoryDocument = await spendCategoriesCollection.findOne({ plaid_categories: plaidSpendCategory });
@@ -62,484 +66,479 @@ async function calculatePointsForTransaction(transaction) {
         }
         const spendCategory = spendCategoryDocument.category;
         console.log("spendCategory: ", spendCategory);
-
+  
         //ADD LOGIC HERE TO SEE IF THIS IS A REBATABLE TRANSACTION 
         const transactionDescription = transaction.original_description;
         const cardCreditRewards = await rewardsCollection.find({
-            card_id: card.card_id,
-            description_on_statement: { $nin: [null, ''] },
-        }).toArray();
-        const normalizedTxDesc = transactionDescription?.toLowerCase() ?? '';
-        const creditReward = cardCreditRewards.find((r) => {
-            const stored = r.description_on_statement.toLowerCase();
-            return normalizedTxDesc.includes(stored) || stored.includes(normalizedTxDesc);
-        }) ?? null;
-        console.log("creditReward: ", creditReward);
-        //IF CREDIT REWARD IS FOUND, THEN THIS MEANS THEY GOT MONEY BACK AUTOMATICALLY ON THEIR STATEMENT, SO NOT EARNING POINTS BUT MAY EVEN DEDUCT POINTS
-        if(creditReward && spendAmount < 0){
-            if(creditReward.deducts_from_points){
-                pointsRate = creditReward.rate;
-                points = spendAmount * pointsRate
-            }
-            //UPDATE THE SPEND SUMMARY WITH THE CREDITS
-            const creditType = creditReward.type;
-            //NOTE: CREDITS THRU SPECIFIC TRAVEL PORTALS ARE TREATED AS MERCHANT CREDITS
-            
-            return {
-                success: true,
-                transaction_id: transaction.transaction_id,
-                points: Math.round(points),
-                points_rate: pointsRate,
-                overage_points_rate: overagePointsRate,
-                spend_over_cap: spendOverCap,
-                is_credit_transaction: true,
-                credit_type: creditType,
-                spend_amount: spendAmount,
-                spend_category: creditReward.category,
-                reward_id: creditReward.reward_id,
-                user_id: user.user_id
-            }
-        }
-        console.log("spendAmount: ", spendAmount);
-        if(spendAmount < 0){
-            if(plaidSpendCategory.includes("LOAN_DISBURSEMENTS") || plaidSpendCategory.includes("INCOME") || plaidSpendCategory.includes("LOAN_PAYMENTS") || plaidSpendCategory.includes("TRANSFER_IN")){
-                return {
-                    success: true,
-                    transaction_id: transaction.transaction_id,
-                    points: 0,
-                    points_rate: 0,
-                    overage_points_rate: 0,
-                    spend_over_cap: 0,
-                    spend_amount: spendAmount,
-                    spend_category: "none",
-                    reward_id: "none", 
-                    user_id: user.user_id
-                }
-            }
-            return {
-                success: true,
-                transaction_id: transaction.transaction_id,
-                points: 0,
-                points_rate: 0,
-                overage_points_rate: 0,
-                spend_over_cap: 0,
-                is_credit_transaction: true,
-                credit_type: "other",
-                spend_amount: spendAmount,
-                spend_category: spendCategory,
-                reward_id: "other", 
-                user_id: user.user_id
-            }
-        }
-        //NEED TO CHECK IF IT'S AN ANNUAL FEE
-        const annualFeeTransaction = await cardsCollection.findOne({
-            card_id: card.card_id,
-            annual_fee_statement_description: transactionDescription,
-        });
-        console.log("1")
-        if(annualFeeTransaction){
-            return {
-                success: true,
-                transaction_id: transaction.transaction_id,
-                points: 0,
-                points_rate: 0,
-                overage_points_rate: 0,
-                spend_over_cap: 0,
-                is_annual_fee_transaction: true,
-                spend_amount: spendAmount,
-                spend_category: "annual_fee",
-                user_id: user.user_id,
-                reward_id: "none"
-            }
-        }
-        console.log("2")
-        let merchantReward = await rewardsCollection.findOne({ 
-            card_id: card.card_id,
-            type:{$ne:"bonus"},
-            merchants: merchant, 
-            $or:[
-                {start_date: {$lte: now}},
-                {start_date: null}
-            ],
-            $or:[
-                {end_date: {$gte: now}},
-                {end_date: null}
-            ],
-        });
-
-        let categoryReward = await rewardsCollection.findOne({ 
-            card_id: card.card_id,
-            type:{$ne:"bonus"},
-            plaid_categories: plaidSpendCategory,
-            $or:[
-                {start_date: {$lte: now}},
-                {start_date: null}
-            ],
-            $or:[
-                {end_date: {$gte: now}},
-                {end_date: null}
-            ],
-        });
-
-        let bonusReward = await rewardsCollection.findOne({ 
-            card_id: card.card_id,
-            type: "bonus",
-            $or:[
-                {start_date: {$lte: now}},
-                {start_date: null}
-            ],
-            $or:[
-                {end_date: {$gte: now}},
-                {end_date: null}
-            ],
-        });
-
-        let isMerchantReward = merchantReward !== null;
-        let reward = merchantReward || categoryReward;
-        let perTransactionMinimumMet = true;
-
-        if (reward) {
-            //CHECK IF USER ACTIVATED REWARD IF NECESSARY
-            if(reward.activation_required){
-                const activation = await activationsCollection.findOne({
-                    reward_id: reward.reward_id,
-                    user_id: user.user_id,
-                    activated: true
-                })
-                userActivated = activation !== null;
-            }
-            //IF REQUIRED ACTIVATION IS NOT MET, WE NEED TO CHECK IF THERE'S A NO ACTIVATION REWARD
-            if(!userActivated){
-                merchantReward = await rewardsCollection.findOne({ 
-                    card_id: card.card_id,
-                    merchants: { $regex: merchant, $options: 'i' }, 
-                    type:{$ne:"bonus"},
-                    activation_required: false,
-                    $or:[
-                        {start_date: {$lte: now}},
-                        {start_date: null}
-                    ],
-                    $or:[
-                        {end_date: {$gte: now}},
-                        {end_date: null}
-                    ],
-                });
-        
-                categoryReward = await rewardsCollection.findOne({ 
-                    card_id: card.card_id,
-                    plaid_categories: plaidSpendCategory,
-                    type:{$ne:"bonus"},
-                    activation_required: false,
-                    $or:[
-                        {start_date: {$lte: now}},
-                        {start_date: null}
-                    ],
-                    $or:[
-                        {end_date: {$gte: now}},
-                        {end_date: null}
-                    ],
-                });
-                isMerchantReward = merchantReward !== null;
-                reward = merchantReward || categoryReward;
-                //check for bonus reward
-                const bonusRewardCheck = await checkForBonusReward(user.user_id, accountId, bonusReward, spendCategory, spendAmount, now);
-                if(!reward){
-                    return {
-                        success: true,
-                        transaction_id: transaction.transaction_id,
-                        points: card.default_point_rate * spendAmount + bonusRewardCheck,
-                        points_rate: card.default_point_rate,
-                        overage_points_rate: card.default_point_rate,
-                        spend_over_cap: 0,
-                        spend_amount: spendAmount,
-                        spend_category: spendCategory,
-                        reward_id: "none",
-                        user_id: user.user_id
-                    }
-                }
-            }
-            console.log("3")
-            console.log("reward: ", JSON.stringify(reward));
-            if(reward.per_transaction_minimum && spendAmount < reward.per_transaction_minimum){
-                reward = isMerchantReward ? categoryReward : {rate: card.default_point_rate}
-                perTransactionMinimumMet = false;
-            }
-            console.log("4")
-            //CHECK IF THERE'S A MONTHLY SPEND CAP
-            if(reward.spend_cap_monthly){
-                const spendSummary = await spendSummariesCollection.findOne({
-                        user_id: user.user_id,
-                        month_year: monthYear,
-                    },
-                    {
-                        _id: 0, // Exclude the _id field if not needed
-                        [`spend_by_account.${accountId}`]: 1 // Include only the nested data for account "aaa"
-                    }
-                )
-                let totalSpend = spendSummary ? 
-                    (isMerchantReward ? 
-                        spendSummary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0 
-                        : spendSummary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0)
-                    : 0;
-                if(totalSpend > reward.spend_cap_monthly){
-                    if(isMerchantReward){
-                        //if it's a merchant reward that we exceeded, 
-                        //we need to check if the category reward is available
-                        totalSpend = spendSummary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
-                        reward = categoryReward;
-                        if(reward){
-                            if(totalSpend > reward.spend_cap_monthly){
-                                exceededSpendLimit = true;
-                            } else {
-                                //we are under the category cap, so just need to see if there's any overage
-                                if((totalSpend + spendAmount) > reward.spend_cap_monthly){
-                                    spendOverCap = spendAmount + totalSpend - reward.spend_cap_monthly;
-                                }
-                            }
-                        } else {
-                            //no category reward, so we exceed the spend limit
-                            exceededSpendLimit = true;
-                        }
-                    } else {
-                        exceededSpendLimit = true;
-                    }
-                } else {
-                    //previous total spend is less than the cap, 
-                    // so we need to check if the new total is over the cap
-                    //besides that, exceededSpendLimit is false since we're not over the cap
-                    if((totalSpend + spendAmount) > reward.spend_cap_monthly){
-                        spendOverCap = spendAmount + totalSpend - reward.spend_cap_monthly;
-                        if(categoryReward){
-                            overagePointsRate = categoryReward.rate;
-                        }
-                    }
-                }
-            }
-            console.log("5")
-            //CHECK IF THERE'S A QUARTERLY SPEND CAP
-            if(!exceededSpendLimit && reward.spend_cap_quarterly){
-                const spendSummaries = await spendSummariesCollection.find({
-                        user_id: user.user_id,
-                        month_year: {$in: quarters[quarter]},
-                    },
-                    {
-                        _id: 0, // Exclude the _id field if not needed
-                        [`spend_by_account.${accountId}`]: 1 // Include only the nested data for account "aaa"
-                    }
-                ).toArray();
-                let totalSpend = 0
-                if(isMerchantReward){
-                    totalSpend = spendSummaries.reduce((acc, summary) => {
-                        return acc + summary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0
-                    },0)
-                    if(totalSpend > reward.spend_cap_quarterly){
-                        reward = categoryReward;
-                        if(reward){
-                            totalSpend = spendSummaries.reduce((acc, summary) => {
-                                return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
-                            },0)
-                            if(totalSpend > reward.spend_cap_quarterly){
-                                exceededSpendLimit = true;
-                            } else {
-                                if((totalSpend + spendAmount) > reward.spend_cap_quarterly){
-                                    spendOverCap = spendAmount + totalSpend - reward.spend_cap_quarterly;
-                                }
-                            }
-                        }
-                    } else {
-                        if((totalSpend + spendAmount) > reward.spend_cap_quarterly){
-                            spendOverCap = spendAmount + totalSpend - reward.spend_cap_quarterly;
-                            if(categoryReward){
-                                overagePointsRate = categoryReward.rate;
-                            }
-                        }
-                    }
-                } else {
-                    totalSpend = spendSummaries.reduce((acc, summary) => {
-                        return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
-                    },0)
-                    if(totalSpend > reward.spend_cap_quarterly){
-                        exceededSpendLimit = true;
-                    } else {
-                        if((totalSpend + spendAmount) > reward.spend_cap_quarterly){
-                            spendOverCap = spendAmount + totalSpend - reward.spend_cap_quarterly;
-                        }
-                    }
-                }
-            }
-            console.log("6")
-            //CHECK IF THERE'S A HALF YEARLY SPEND CAP
-            if(!exceededSpendLimit && reward.spend_cap_biannual){
-                const spendSummaries = await spendSummariesCollection.find({
-                        user_id: user.user_id,
-                        month_year: {$in: halves[half]},
-                    },
-                    {
-                        _id: 0, // Exclude the _id field if not needed
-                        [`spend_by_account.${accountId}`]: 1 // Include only the nested data for account "aaa"
-                    }
-                ).toArray();
-                let totalSpend = 0
-                if(isMerchantReward){
-                    totalSpend = spendSummaries.reduce((acc, summary) => {
-                        return acc + summary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0
-                    },0)
-                    if(totalSpend > reward.spend_cap_biannual){
-                        reward = categoryReward;
-                        if(reward){
-                            totalSpend = spendSummaries.reduce((acc, summary) => {
-                                return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
-                            },0)
-                            if(totalSpend > reward.spend_cap_biannual){
-                                exceededSpendLimit = true;
-                            } else {
-                                if((totalSpend + spendAmount) > reward.spend_cap_biannual){
-                                    spendOverCap = spendAmount + totalSpend - reward.spend_cap_biannual;
-                                }
-                            }
-                        }
-                    } else {
-                        if((totalSpend + spendAmount) > reward.spend_cap_biannual){
-                            spendOverCap = spendAmount + totalSpend - reward.spend_cap_biannual;
-                            if(categoryReward){
-                                overagePointsRate = categoryReward.rate;
-                            }
-                        }
-                    }
-                } else {
-                    totalSpend = spendSummaries.reduce((acc, summary) => {
-                        return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
-                    },0)
-                    if(totalSpend > reward.spend_cap_biannual){
-                        exceededSpendLimit = true;
-                    } else {
-                        if((totalSpend + spendAmount) > reward.spend_cap_biannual){
-                            spendOverCap = spendAmount + totalSpend - reward.spend_cap_biannual;
-                        }
-                    }
-                }
-            }
-            console.log("7")
-            //CHECK IF THERE'S A ANNUAL SPEND CAP
-            if(!exceededSpendLimit && reward.spend_cap_annual){
-                console.log("thisYear: ", thisYear);
-                const spendSummaries = await spendSummariesCollection.find({
-                        user_id: user.user_id,
-                        month_year: {$regex: `${thisYear}`},
-                    },
-                    {
-                        _id: 0, // Exclude the _id field if not needed
-                        [`spend_by_account.${accountId}`]: 1 // Include only the nested data for account "aaa"
-                    }
-                ).toArray();
-                console.log("spendSummaries: ", spendSummaries);
-                let totalSpend = 0
-                if(isMerchantReward){
-                    totalSpend = spendSummaries.reduce((acc, summary) => {
-                        return acc + summary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0
-                    },0)
-                    if(totalSpend > reward.spend_cap_annual){
-                        reward = categoryReward;
-                        if(reward){
-                            totalSpend = spendSummaries.reduce((acc, summary) => {
-                                return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
-                            },0)
-                            if(totalSpend > reward.spend_cap_annual){
-                                exceededSpendLimit = true;
-                            } else {
-                                if((totalSpend + spendAmount) > reward.spend_cap_annual){
-                                    spendOverCap = spendAmount + totalSpend - reward.spend_cap_annual;
-                                }
-                            }
-                        }
-                    } else {
-                        if((totalSpend + spendAmount) > reward.spend_cap_annual){
-                            spendOverCap = spendAmount + totalSpend - reward.spend_cap_annual;
-                            if(categoryReward){
-                                overagePointsRate = categoryReward.rate;
-                            }
-                        }
-                    }
-                } else {
-                    totalSpend = spendSummaries.reduce((acc, summary) => {
-                        return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
-                    },0)
-                    if(totalSpend > reward.spend_cap_annual){
-                        exceededSpendLimit = true;
-                    } else {
-                        if((totalSpend + spendAmount) > reward.spend_cap_annual){
-                            spendOverCap = spendAmount + totalSpend - reward.spend_cap_annual;
-                        }
-                    }
-                }
-            }
-            console.log("8")
-            //CHECK IF THERE'S A ALL-TIME SPEND CAP (within reward start/end window)
-            if(!exceededSpendLimit && reward.spend_cap_all_time){
-                const spendSummaries = await spendSummariesCollection.find({
-                        user_id: user.user_id,
-                        ...buildRewardWindowMonthYearFilter(reward, now),
-                    },
-                    {
-                        _id: 0, // Exclude the _id field if not needed
-                        [`spend_by_account.${accountId}`]: 1 // Include only the nested data for account "aaa"
-                    }
-                ).toArray();
-                console.log("spendSummaries: ", spendSummaries);
-                let totalSpend = 0
-                if(isMerchantReward){
-                    totalSpend = spendSummaries.reduce((acc, summary) => {
-                        return acc + summary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0
-                    },0)
-                    if(totalSpend > reward.spend_cap_all_time){
-                        reward = categoryReward;
-                        if(reward){
-                            totalSpend = spendSummaries.reduce((acc, summary) => {
-                                return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
-                            },0)
-                            if(totalSpend > reward.spend_cap_all_time){
-                                exceededSpendLimit = true;
-                            } else {
-                                if((totalSpend + spendAmount) > reward.spend_cap_all_time){
-                                    spendOverCap = spendAmount + totalSpend - reward.spend_cap_all_time;
-                                }
-                            }
-                        }
-                    } else {
-                        if((totalSpend + spendAmount) > reward.spend_cap_all_time){
-                            spendOverCap = spendAmount + totalSpend - reward.spend_cap_all_time;
-                            if(categoryReward){
-                                overagePointsRate = categoryReward.rate;
-                            }
-                        }
-                    }
-                } else {
-                    totalSpend = spendSummaries.reduce((acc, summary) => {
-                        return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
-                    },0)
-                    if(totalSpend > reward.spend_cap_all_time){
-                        exceededSpendLimit = true;
-                    } else {
-                        if((totalSpend + spendAmount) > reward.spend_cap_all_time){
-                            spendOverCap = spendAmount + totalSpend - reward.spend_cap_all_time;
-                        }
-                    }
-                }
-            }
-            console.log("9")
+              card_id: card.card_id,
+              description_on_statement: { $nin: [null, ''] },
+          }).toArray();
+          const normalizedTxDesc = transactionDescription?.toLowerCase() ?? '';
+          const creditReward = cardCreditRewards.find((r) => {
+              const stored = r.description_on_statement.toLowerCase();
+              return normalizedTxDesc.includes(stored) || stored.includes(normalizedTxDesc);
+          }) ?? null;
+          console.log("creditReward: ", creditReward);
+          //IF CREDIT REWARD IS FOUND, THEN THIS MEANS THEY GOT MONEY BACK AUTOMATICALLY ON THEIR STATEMENT, SO NOT EARNING POINTS BUT MAY EVEN DEDUCT POINTS
+          if(creditReward && spendAmount < 0){
+              if(creditReward.deducts_from_points){
+                  pointsRate = creditReward.rate;
+                  points = spendAmount * pointsRate
+              }
+              //UPDATE THE SPEND SUMMARY WITH THE CREDITS
+              const creditType = creditReward.type;
+              //NOTE: CREDITS THRU SPECIFIC TRAVEL PORTALS ARE TREATED AS MERCHANT CREDITS
+              
+              return {
+                  success: true,
+                  transaction_id: transaction.transaction_id,
+                  points: Math.round(points),
+                  points_rate: pointsRate,
+                  overage_points_rate: overagePointsRate,
+                  spend_over_cap: spendOverCap,
+                  is_credit_transaction: true,
+                  credit_type: creditType,
+                  spend_amount: spendAmount,
+                  spend_category: creditReward.category,
+                  reward_id: creditReward.reward_id,
+                  user_id: user.user_id
+              }
+          }
+          console.log("spendAmount: ", spendAmount);
+          if(spendAmount < 0){
+              if(plaidSpendCategory.includes("LOAN_DISBURSEMENTS") || plaidSpendCategory.includes("INCOME") || plaidSpendCategory.includes("LOAN_PAYMENTS") || plaidSpendCategory.includes("TRANSFER_IN")){
+                  return {
+                      success: true,
+                      transaction_id: transaction.transaction_id,
+                      points: 0,
+                      points_rate: 0,
+                      overage_points_rate: 0,
+                      spend_over_cap: 0,
+                      spend_amount: spendAmount,
+                      spend_category: "none",
+                      reward_id: "none", 
+                      user_id: user.user_id
+                  }
+              }
+              return {
+                  success: true,
+                  transaction_id: transaction.transaction_id,
+                  points: 0,
+                  points_rate: 0,
+                  overage_points_rate: 0,
+                  spend_over_cap: 0,
+                  is_credit_transaction: true,
+                  credit_type: "other",
+                  spend_amount: spendAmount,
+                  spend_category: spendCategory,
+                  reward_id: "other", 
+                  user_id: user.user_id
+              }
+          }
+          //NEED TO CHECK IF IT'S AN ANNUAL FEE
+          const annualFeeTransaction = await cardsCollection.findOne({
+              card_id: card.card_id,
+              annual_fee_statement_description: transactionDescription,
+          });
+          if(annualFeeTransaction){
+              return {
+                  success: true,
+                  transaction_id: transaction.transaction_id,
+                  points: 0,
+                  points_rate: 0,
+                  overage_points_rate: 0,
+                  spend_over_cap: 0,
+                  is_annual_fee_transaction: true,
+                  spend_amount: spendAmount,
+                  spend_category: "annual_fee",
+                  user_id: user.user_id,
+                  reward_id: "none"
+              }
+          }
+          let merchantReward = merchant ? await rewardsCollection.findOne({ 
+              card_id: card.card_id,
+              type:"base",
+              merchants: { $regex: escapeRegex(merchant), $options: 'i' },  
+              $or:[
+                  {start_date: {$lte: now}},
+                  {start_date: null}
+              ],
+              $or:[
+                  {end_date: {$gte: now}},
+                  {end_date: null}
+              ],
+          }) : null;
+  
+          let categoryReward = await rewardsCollection.findOne({ 
+              card_id: card.card_id,
+              type:"base",
+              plaid_categories: plaidSpendCategory,
+              $or:[
+                  {start_date: {$lte: now}},
+                  {start_date: null}
+              ],
+              $or:[
+                  {end_date: {$gte: now}},
+                  {end_date: null}
+              ],
+          });
+  
+          let bonusReward = await rewardsCollection.findOne({ 
+              card_id: card.card_id,
+              type: "bonus",
+              $or:[
+                  {start_date: {$lte: now}},
+                  {start_date: null}
+              ],
+              $or:[
+                  {end_date: {$gte: now}},
+                  {end_date: null}
+              ],
+          });
+      
+          let isMerchantReward = merchantReward !== null;
+          let reward = merchantReward || categoryReward;
+          let perTransactionMinimumMet = true;
+  
+          if (reward) {
+              //CHECK IF USER ACTIVATED REWARD IF NECESSARY
+              if(reward.activation_required){
+                  const activation = await activationsCollection.findOne({
+                      reward_id: reward.reward_id,
+                      user_id: user.user_id,
+                      activated: true
+                  })
+                  userActivated = activation !== null;
+              }
+              //IF REQUIRED ACTIVATION IS NOT MET, WE NEED TO CHECK IF THERE'S A NO ACTIVATION REWARD
+              if(!userActivated){
+                  merchantReward = merchant ? await rewardsCollection.findOne({ 
+                      card_id: card.card_id,
+                      merchants: { $regex: escapeRegex(merchant), $options: 'i' }, 
+                      type:"base",
+                      activation_required: false,
+                      $or:[
+                          {start_date: {$lte: now}},
+                          {start_date: null}
+                      ],
+                      $or:[
+                          {end_date: {$gte: now}},
+                          {end_date: null}
+                      ],
+                  }) : null;
+          
+                  categoryReward = await rewardsCollection.findOne({ 
+                      card_id: card.card_id,
+                      type:"base",
+                      plaid_categories: plaidSpendCategory,
+                      activation_required: false,
+                      $or:[
+                          {start_date: {$lte: now}},
+                          {start_date: null}
+                      ],
+                      $or:[
+                          {end_date: {$gte: now}},
+                          {end_date: null}
+                      ],
+                  });
+                  isMerchantReward = merchantReward !== null;
+                  reward = merchantReward || categoryReward;
+                  const bonusRewardCheck = await context.functions.execute("checkForBonusReward",user.user_id, accountId, bonusReward, spendCategory, spendAmount, now);
+                  if(!reward){
+                      return {
+                          success: true,
+                          transaction_id: transaction.transaction_id,
+                          points: card.default_point_rate * spendAmount + bonusRewardCheck,
+                          points_rate: card.default_point_rate,
+                          overage_points_rate: card.default_point_rate,
+                          spend_over_cap: 0,
+                          spend_amount: spendAmount,
+                          spend_category: spendCategory,
+                          reward_id: "none",
+                          user_id: user.user_id
+                      }
+                  }
+              }
+              console.log("3")
+              console.log("reward: ", JSON.stringify(reward));
+              if(reward.per_transaction_minimum && spendAmount < reward.per_transaction_minimum){
+                  reward = isMerchantReward ? (categoryReward ? categoryReward : {rate: card.default_point_rate}) : {rate: card.default_point_rate}
+                  perTransactionMinimumMet = false;
+              }
+              console.log("4")
+              //CHECK IF THERE'S A MONTHLY SPEND CAP
+              if(reward.spend_cap_monthly){
+                  const spendSummary = await spendSummariesCollection.findOne({
+                          user_id: user.user_id,
+                          month_year: monthYear,
+                      },
+                      {
+                          _id: 0, // Exclude the _id field if not needed
+                          [`spend_by_account.${accountId}`]: 1 // Include only the nested data for account "aaa"
+                      }
+                  )
+                  let totalSpend = spendSummary ? 
+                      (isMerchantReward ? 
+                          spendSummary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0 
+                          : spendSummary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0)
+                      : 0;
+                  if(totalSpend > reward.spend_cap_monthly){
+                      if(isMerchantReward){
+                          //if it's a merchant reward that we exceeded, 
+                          //we need to check if the category reward is available
+                          totalSpend = spendSummary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
+                          reward = categoryReward;
+                          if(reward){
+                              if(totalSpend > reward.spend_cap_monthly){
+                                  exceededSpendLimit = true;
+                              } else {
+                                  //we are under the category cap, so just need to see if there's any overage
+                                  if((totalSpend + spendAmount) > reward.spend_cap_monthly){
+                                      spendOverCap = spendAmount + totalSpend - reward.spend_cap_monthly;
+                                  }
+                              }
+                          } else {
+                              //no category reward, so we exceed the spend limit
+                              exceededSpendLimit = true;
+                          }
+                      } else {
+                          exceededSpendLimit = true;
+                      }
+                  } else {
+                      //previous total spend is less than the cap, 
+                      // so we need to check if the new total is over the cap
+                      //besides that, exceededSpendLimit is false since we're not over the cap
+                      if((totalSpend + spendAmount) > reward.spend_cap_monthly){
+                          spendOverCap = spendAmount + totalSpend - reward.spend_cap_monthly;
+                          if(categoryReward){
+                              overagePointsRate = categoryReward.rate;
+                          }
+                      }
+                  }
+              }
+              console.log("5")
+              //CHECK IF THERE'S A QUARTERLY SPEND CAP
+              if(!exceededSpendLimit && reward && reward.spend_cap_quarterly){
+                  const spendSummaries = await spendSummariesCollection.find({
+                          user_id: user.user_id,
+                          month_year: {$in: quarters[quarter]},
+                      },
+                      {
+                          _id: 0, // Exclude the _id field if not needed
+                          [`spend_by_account.${accountId}`]: 1 // Include only the nested data for account "aaa"
+                      }
+                  ).toArray();
+                  let totalSpend = 0
+                  if(isMerchantReward){
+                      totalSpend = spendSummaries.reduce((acc, summary) => {
+                          return acc + summary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0
+                      },0)
+                      if(totalSpend > reward.spend_cap_quarterly){
+                          reward = categoryReward;
+                          if(reward){
+                              totalSpend = spendSummaries.reduce((acc, summary) => {
+                                  return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
+                              },0)
+                              if(totalSpend > reward.spend_cap_quarterly){
+                                  exceededSpendLimit = true;
+                              } else {
+                                  if((totalSpend + spendAmount) > reward.spend_cap_quarterly){
+                                      spendOverCap = spendAmount + totalSpend - reward.spend_cap_quarterly;
+                                  }
+                              }
+                          }
+                      } else {
+                          if((totalSpend + spendAmount) > reward.spend_cap_quarterly){
+                              spendOverCap = spendAmount + totalSpend - reward.spend_cap_quarterly;
+                              if(categoryReward){
+                                  overagePointsRate = categoryReward.rate;
+                              }
+                          }
+                      }
+                  } else {
+                      totalSpend = spendSummaries.reduce((acc, summary) => {
+                          return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
+                      },0)
+                      if(totalSpend > reward.spend_cap_quarterly){
+                          exceededSpendLimit = true;
+                      } else {
+                          if((totalSpend + spendAmount) > reward.spend_cap_quarterly){
+                              spendOverCap = spendAmount + totalSpend - reward.spend_cap_quarterly;
+                          }
+                      }
+                  }
+              }
+              console.log("6")
+              //CHECK IF THERE'S A HALF YEARLY SPEND CAP
+              if(!exceededSpendLimit && reward && reward.spend_cap_biannual){
+                  const spendSummaries = await spendSummariesCollection.find({
+                          user_id: user.user_id,
+                          month_year: {$in: halves[half]},
+                      },
+                      {
+                          _id: 0, // Exclude the _id field if not needed
+                          [`spend_by_account.${accountId}`]: 1 // Include only the nested data for account "aaa"
+                      }
+                  ).toArray();
+                  let totalSpend = 0
+                  if(isMerchantReward){
+                      totalSpend = spendSummaries.reduce((acc, summary) => {
+                          return acc + summary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0
+                      },0)
+                      if(totalSpend > reward.spend_cap_biannual){
+                          reward = categoryReward;
+                          if(reward){
+                              totalSpend = spendSummaries.reduce((acc, summary) => {
+                                  return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
+                              },0)
+                              if(totalSpend > reward.spend_cap_biannual){
+                                  exceededSpendLimit = true;
+                              } else {
+                                  if((totalSpend + spendAmount) > reward.spend_cap_biannual){
+                                      spendOverCap = spendAmount + totalSpend - reward.spend_cap_biannual;
+                                  }
+                              }
+                          }
+                      } else {
+                          if((totalSpend + spendAmount) > reward.spend_cap_biannual){
+                              spendOverCap = spendAmount + totalSpend - reward.spend_cap_biannual;
+                              if(categoryReward){
+                                  overagePointsRate = categoryReward.rate;
+                              }
+                          }
+                      }
+                  } else {
+                      totalSpend = spendSummaries.reduce((acc, summary) => {
+                          return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
+                      },0)
+                      if(totalSpend > reward.spend_cap_biannual){
+                          exceededSpendLimit = true;
+                      } else {
+                          if((totalSpend + spendAmount) > reward.spend_cap_biannual){
+                              spendOverCap = spendAmount + totalSpend - reward.spend_cap_biannual;
+                          }
+                      }
+                  }
+              }
+              console.log("7")
+              //CHECK IF THERE'S A ANNUAL SPEND CAP
+              if(!exceededSpendLimit && reward && reward.spend_cap_annual){
+                  console.log("thisYear: ", thisYear);
+                  const spendSummaries = await spendSummariesCollection.find({
+                          user_id: user.user_id,
+                          month_year: {$regex: `${thisYear}`},
+                      },
+                      {
+                          _id: 0, // Exclude the _id field if not needed
+                          [`spend_by_account.${accountId}`]: 1 // Include only the nested data for account "aaa"
+                      }
+                  ).toArray();
+                  console.log("spendSummaries: ", spendSummaries);
+                  let totalSpend = 0
+                  if(isMerchantReward){
+                      totalSpend = spendSummaries.reduce((acc, summary) => {
+                          return acc + summary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0
+                      },0)
+                      if(totalSpend > reward.spend_cap_annual){
+                          reward = categoryReward;
+                          if(reward){
+                              totalSpend = spendSummaries.reduce((acc, summary) => {
+                                  return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
+                              },0)
+                              if(totalSpend > reward.spend_cap_annual){
+                                  exceededSpendLimit = true;
+                              } else {
+                                  if((totalSpend + spendAmount) > reward.spend_cap_annual){
+                                      spendOverCap = spendAmount + totalSpend - reward.spend_cap_annual;
+                                  }
+                              }
+                          }
+                      } else {
+                          if((totalSpend + spendAmount) > reward.spend_cap_annual){
+                              spendOverCap = spendAmount + totalSpend - reward.spend_cap_annual;
+                              if(categoryReward){
+                                  overagePointsRate = categoryReward.rate;
+                              }
+                          }
+                      }
+                  } else {
+                      totalSpend = spendSummaries.reduce((acc, summary) => {
+                          return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
+                      },0)
+                      if(totalSpend > reward.spend_cap_annual){
+                          exceededSpendLimit = true;
+                      } else {
+                          if((totalSpend + spendAmount) > reward.spend_cap_annual){
+                              spendOverCap = spendAmount + totalSpend - reward.spend_cap_annual;
+                          }
+                      }
+                  }
+              }
+              console.log("8")
+              //CHECK IF THERE'S A ALL-TIME SPEND CAP (within reward start/end window)
+              if(!exceededSpendLimit && reward && reward.spend_cap_all_time){
+                  const spendSummaries = await spendSummariesCollection.find({
+                          user_id: user.user_id,
+                          ...buildRewardWindowMonthYearFilter(reward, now),
+                      },
+                      {
+                          _id: 0, // Exclude the _id field if not needed
+                          [`spend_by_account.${accountId}`]: 1 // Include only the nested data for account "aaa"
+                      }
+                  ).toArray();
+                  console.log("spendSummaries: ", spendSummaries);
+                  let totalSpend = 0
+                  if(isMerchantReward){
+                      totalSpend = spendSummaries.reduce((acc, summary) => {
+                          return acc + summary.spend_by_account[accountId]?.spend_by_merchant[merchant] || 0
+                      },0)
+                      if(totalSpend > reward.spend_cap_all_time){
+                          reward = categoryReward;
+                          if(reward){
+                              totalSpend = spendSummaries.reduce((acc, summary) => {
+                                  return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
+                              },0)
+                              if(totalSpend > reward.spend_cap_all_time){
+                                  exceededSpendLimit = true;
+                              } else {
+                                  if((totalSpend + spendAmount) > reward.spend_cap_all_time){
+                                      spendOverCap = spendAmount + totalSpend - reward.spend_cap_all_time;
+                                  }
+                              }
+                          }
+                      } else {
+                          if((totalSpend + spendAmount) > reward.spend_cap_all_time){
+                              spendOverCap = spendAmount + totalSpend - reward.spend_cap_all_time;
+                              if(categoryReward){
+                                  overagePointsRate = categoryReward.rate;
+                              }
+                          }
+                      }
+                  } else {
+                      totalSpend = spendSummaries.reduce((acc, summary) => {
+                          return acc + summary.spend_by_account[accountId]?.spend_by_category[spendCategory] || 0
+                      },0)
+                      if(totalSpend > reward.spend_cap_all_time){
+                          exceededSpendLimit = true;
+                      } else {
+                          if((totalSpend + spendAmount) > reward.spend_cap_all_time){
+                              spendOverCap = spendAmount + totalSpend - reward.spend_cap_all_time;
+                          }
+                      }
+                  }
+              }
+              console.log("9")
             pointsRate = exceededSpendLimit ? card.default_point_rate : reward.rate
-
+  
             points = spendOverCap > 0 ? spendOverCap * overagePointsRate + (spendAmount - spendOverCap) * pointsRate : pointsRate * spendAmount;
             
-
+  
         } else {
             pointsRate = card.default_point_rate;
             points = pointsRate * spendAmount;
         }
-        //CHECK IF THERE'S A BONUS REWARD
-        const bonusRewardCheck = await checkForBonusReward(user.user_id, accountId, bonusReward, spendCategory, spendAmount, now);
-        await mongo.close();
-
+        const bonusRewardCheck = await context.functions.execute("checkForBonusReward",user.user_id, accountId, bonusReward, spendCategory, spendAmount, now);
+        // await mongo.close();
         //Check if transaction is applicable
         if(nonApplicableTransactions.find(transaction => plaidSpendCategory.includes(transaction))){
             return {
@@ -556,6 +555,7 @@ async function calculatePointsForTransaction(transaction) {
                 is_non_applicable_transaction: true,
             }
         }
+      
         return {
             success: true,
             transaction_id: transaction.transaction_id,
@@ -568,7 +568,7 @@ async function calculatePointsForTransaction(transaction) {
             spend_category: spendCategory ? spendCategory : 'everything_else',
             per_transaction_minimum_met: perTransactionMinimumMet,
             user_id: user.user_id,
-            reward_id: reward ? reward.reward_id : "none"
+            reward_id: reward ? reward.reward_id : "default"
         }
         
     } catch(err) {

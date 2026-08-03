@@ -296,8 +296,8 @@ const attachCreditMerchantSpend = async (db, accounts, { user_id, month_year, ye
             credit_category_spend[reward.reward_id] = spendSummaryDocs.reduce((total, doc) => {
                 if (!monthYearLabels.includes(doc.month_year)) return total;
                 const bucket = doc.spend_by_account?.[account.account_id];
-                if (!bucket?.credits_by_category) return total;
-                return total + (bucket.credits_by_category[reward.reward_id] || 0);
+                if (!bucket?.credit_by_reward) return total;
+                return total + (bucket.credit_by_reward[reward.reward_id] || 0);
             }, 0);
         }
 

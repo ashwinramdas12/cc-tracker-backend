@@ -58,6 +58,7 @@ const mongoOperation = async ({
   projection,
   options,
   aggregation,
+  unset,
 }) => {
   const mongo = await connectToMongo();
   const db = mongo.db(process.env.DATABASE_NAME);
@@ -78,14 +79,20 @@ const mongoOperation = async ({
     result = await db.collection(collection).countDocuments(filter, options);
   }
   if (operation === "updateOne") {
-    if (payload.last_login) {
+    if (payload?.last_login) {
       payload.last_login = new Date(payload.last_login);
     }
     const updatePayload = { $set: { ...payload, updated_at: new Date() } };
+    if (unset && Object.keys(unset).length > 0) {
+      updatePayload.$unset = unset;
+    }
     result = await db.collection(collection).updateOne(filter, updatePayload, options);
   }
   if (operation === "updateMany") {
     const updatePayload = { $set: { ...payload, updated_at: new Date() } };
+    if (unset && Object.keys(unset).length > 0) {
+      updatePayload.$unset = unset;
+    }
     result = await db.collection(collection).updateMany(filter, updatePayload, options);
   }
   if (operation === "find") {
@@ -1072,9 +1079,9 @@ api.get("/issuers/admin", wrap(async (req, res) => {
 api.post(
   "/mongoOperation",
   wrap(async (req, res) => {
-    const { operation, collection, filter, projection, options, payload, aggregation } =
+    const { operation, collection, filter, projection, options, payload, aggregation, unset } =
       req.body || {};
-    const result = await mongoOperation({ operation, collection, filter, projection, options, payload, aggregation });
+    const result = await mongoOperation({ operation, collection, filter, projection, options, payload, aggregation, unset });
     return res.json(result);
   })
 );

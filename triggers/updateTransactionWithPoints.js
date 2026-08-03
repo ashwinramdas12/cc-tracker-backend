@@ -23,10 +23,11 @@ exports = async function (changeEvent) {
             const originalTransaction = await transactionsCollection.findOne({
                 transaction_id: transaction.transaction_id
             });
-            originalPoints = originalTransaction.points;
+            originalPoints = originalTransaction.points || 0;
             originalSpendAmount = originalTransaction.amount;
         }
-        const pointsResult = await calculatePointsForTransaction(transaction);
+        var pointsResult = await context.functions.execute("calculatePointsForTransaction",transaction);
+        console.log("pointsResult",JSON.stringify(pointsResult))
         if(pointsResult.is_annual_fee_transaction){
             //update the account with the next annual fee date
             const nextAnnualFeeDate = new Date(transaction.authorized_datetime);
@@ -49,10 +50,11 @@ exports = async function (changeEvent) {
             }, {
                 $set: updateAccountPayload
             })
-        }
+        } 
         if(!pointsResult.user_id){
             console.log("pointsResult.user_id is not set for transaction: ", transaction.transaction_id);
         }
+        const thisReward = await rewardsCollection.findOne({reward_id:pointsResult.reward_id})
         const updatePayload = {
             points: pointsResult.points,
             points_rate: pointsResult.points_rate,
@@ -65,8 +67,7 @@ exports = async function (changeEvent) {
             is_credit_transaction: pointsResult.is_credit_transaction,
             reward_id: pointsResult.reward_id,
             update_from_plaid:false
-          }
-
+        }
         await transactionsCollection.updateOne({
             transaction_id: transaction.transaction_id
         }, {
@@ -74,49 +75,51 @@ exports = async function (changeEvent) {
         }, {
             upsert: true
         })
-
         //handle the case where it's a modified transaction with diff points
         const newPoints = pointsResult.points - originalPoints;
         const newSpendAmount = parseFloat(pointsResult.spend_amount) - parseFloat(originalSpendAmount);
 
         const creditReward = pointsResult.is_credit_transaction ? pointsResult.credit_type : null;
         let setSpendSummaryPayload = null;
+        const safeKey = (s) => String(s ?? '').replace(/\./g, '');
+        const merchantKey =transaction.merchant_name ? safeKey(transaction.merchant_name) : null;
         if(newPoints > 0){
             if(creditReward){
-                setSpendSummaryPayload = pointsResult.credit_type === 'merchantCredit' ? {
+                setSpendSummaryPayload ={
                     $inc: {
-                        [`spend_by_account.${accountId}.spend_by_merchant.${pointsResult.merchant}`]: newSpendAmount,
+                        [`spend_by_account.${accountId}.spend_by_merchant.${merchantKey || 'unknown'}`]: newSpendAmount,
                         [`spend_by_account.${accountId}.spend_by_category.${pointsResult.spend_category}`]: newSpendAmount,
-                        [`spend_by_account.${accountId}.points_by_merchant.${pointsResult.merchant}`]: newPoints,
+                        [`spend_by_account.${accountId}.points_by_merchant.${merchantKey || 'unknown'}`]: newPoints,
                         [`spend_by_account.${accountId}.points_by_category.${pointsResult.spend_category}`]: newPoints,
-                        [`spend_by_account.${accountId}.credits_by_merchant.${pointsResult.merchant}`]: newSpendAmount
-                    }
-                } : {
-                    $inc: {
-                        [`spend_by_account.${accountId}.spend_by_category.${pointsResult.spend_category}`]: newSpendAmount,
-                        [`spend_by_account.${accountId}.credits_by_category.${pointsResult.reward_id}`]: newSpendAmount,
-                        [`spend_by_account.${accountId}.points_by_category.${pointsResult.spend_category}`]: newPoints,
-                    }
+                        [`spend_by_account.${accountId}.credit_by_reward.${pointsResult.reward_id}`]: Math.abs(newSpendAmount)
+                        }
                 }
             } else {
                 if(pointsResult.spend_category && pointsResult.spend_category === "none"){ 
                 } else {
-                    setSpendSummaryPayload = pointsResult.reward_type === 'merchant' ? {
+                    setSpendSummaryPayload = {
                         $inc: {
-                            [`spend_by_account.${accountId}.spend_by_merchant.${pointsResult.merchant}`]: newSpendAmount,
+                            [`spend_by_account.${accountId}.spend_by_merchant.${merchantKey || 'unknown'}`]: newSpendAmount,
                             [`spend_by_account.${accountId}.spend_by_category.${pointsResult.spend_category}`]: newSpendAmount,
                             [`spend_by_account.${accountId}.points_by_category.${pointsResult.spend_category}`]: newPoints,
-                            [`spend_by_account.${accountId}.points_by_merchant.${pointsResult.merchant}`]: newPoints,
-                        }
-                    } : {
-                        $inc: {
-                            [`spend_by_account.${accountId}.spend_by_category.${pointsResult.spend_category}`]: newSpendAmount,
-                            [`spend_by_account.${accountId}.points_by_category.${pointsResult.spend_category}`]: newPoints,
+                            [`spend_by_account.${accountId}.points_by_merchant.${merchantKey || 'unknown'}`]: newPoints,
                         }
                     }
                 }
             }
+    
+            
+        } else if(creditReward){
+            setSpendSummaryPayload ={
+                $inc: {
+                [`spend_by_account.${accountId}.points_by_merchant.${merchantKey || 'unknown'}`]: newPoints,
+                [`spend_by_account.${accountId}.points_by_category.${pointsResult.spend_category}`]: newPoints,
+                [`spend_by_account.${accountId}.credit_by_reward.${pointsResult.reward_id}`]: Math.abs(newSpendAmount)
+                }
+            }
+        }
 
+        if(setSpendSummaryPayload){
             await spendSummariesCollection.updateOne({
                 user_id: pointsResult.user_id,
                 month_year: monthYear
@@ -124,12 +127,12 @@ exports = async function (changeEvent) {
                 upsert: true
             })
         }
+
         if(transaction.type === "modified"){
             return;
         }
-
         //Check if a better card could have been used for this transaction
-        const betterCardId = await checkForBetterCard({...transaction, ...updatePayload});
+        const betterCardId = await context.functions.execute("checkForBetterCard",{...transaction, ...updatePayload});
         if(betterCardId){
             await transactionsCollection.updateOne({
                 transaction_id: transaction.transaction_id
@@ -140,7 +143,7 @@ exports = async function (changeEvent) {
             })
         }
         //check rewards to see if a certain merchant reward exists that needs to be activated for the card used
-        const rewardToActivateId = await checkForRewardToActivate({...transaction, ...updatePayload});
+        const rewardToActivateId = await context.functions.execute("checkForRewardToActivate",{...transaction, ...updatePayload});
         if(rewardToActivateId){
             await transactionsCollection.updateOne({
                 transaction_id: transaction.transaction_id

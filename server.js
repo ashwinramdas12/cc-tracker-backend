@@ -192,6 +192,7 @@ const persistPlaidTransactionAdds = async (db, txs, user_id, plaid_item_id, { in
       const txDate = new Date(tx.authorized_datetime || tx.date);
       if (txDate < cutoffDate) continue;
     }
+    delete tx.category;
     delete tx.unofficial_currency_code
     delete tx.counterparties
     delete tx.payment_meta
@@ -218,6 +219,7 @@ const persistPlaidTransactionModified = async (db, txs, user_id, plaid_item_id) 
   const collection = db.collection("transactions");
   let count = 0;
   for (const tx of txs) {
+    delete tx.category;
     const updateResult = await collection.updateOne(
       { user_id, transaction_id: tx.transaction_id },
       {

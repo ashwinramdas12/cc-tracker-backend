@@ -551,12 +551,15 @@ const cardDetailsLookupStages = () => [
     { $unset: ["_cardDetailsArr"] },
 ];
 
-const accountsDetailedAggregation = (user_id, month_year) => {
+const accountsDetailedAggregation = (user_id, account_id, month_year) => {
     const monthYearNow = month_year || monthYearLabel(new Date());
     const monthYearPrevious = previousMonthYearLabel(monthYearNow);
 
+    const match = { user_id };
+    if (account_id) match.account_id = account_id;
+
     return [
-        { $match: { user_id } },
+        { $match: match },
         spendSummaryLookupMonth(monthYearNow, "spend_summary_raw"),
         spendSummaryLookupMonth(monthYearPrevious, "spend_summary_previous_raw"),
         spendSummaryFromMonthRaw("$spend_summary_raw", "spend_summary"),
@@ -571,7 +574,7 @@ const accountsDetailedAggregation = (user_id, month_year) => {
  * Same as month mode, but spend_summary rolls up all months in `year`:
  * sums numeric values per key for spend_by_category, spend_by_merchant, points_by_category, points_by_merchant.
  */
-const accountsDetailedAggregationByYear = (user_id, year) => {
+const accountsDetailedAggregationByYear = (user_id, account_id, year) => {
     const yearNum = typeof year === "number" ? year : parseInt(String(year), 10);
     if (!Number.isFinite(yearNum)) {
         throw new Error("year must be a number or numeric string");
@@ -579,8 +582,11 @@ const accountsDetailedAggregationByYear = (user_id, year) => {
 
     const yearPrevious = yearNum - 1;
 
+    const match = { user_id };
+    if (account_id) match.account_id = account_id;
+
     return [
-        { $match: { user_id } },
+        { $match: match },
         spendSummaryLookupYear(yearNum, "spend_summary_raw"),
         spendSummaryLookupYear(yearPrevious, "spend_summary_previous_raw"),
         spendSummaryFromYearRaw("$spend_summary_raw", "spend_summary", yearNum),
@@ -595,7 +601,7 @@ const accountsDetailedAggregationByYear = (user_id, year) => {
     ];
 };
 
-const accountsDetailed = async ({ user_id, month_year, year } = {}) => {
+const accountsDetailed = async ({ user_id, account_id, month_year, year } = {}) => {
     if (!user_id || typeof user_id !== "string") {
         throw new Error("user_id is required");
     }
@@ -612,8 +618,8 @@ const accountsDetailed = async ({ user_id, month_year, year } = {}) => {
     const db = mongo.db(process.env.DATABASE_NAME);
 
     const aggregation = hasYear
-        ? accountsDetailedAggregationByYear(user_id, year)
-        : accountsDetailedAggregation(user_id, hasMonthYear ? month_year : undefined);
+        ? accountsDetailedAggregationByYear(user_id, account_id, year)
+        : accountsDetailedAggregation(user_id, account_id, hasMonthYear ? month_year : undefined);
 
     const accounts = await db.collection("accounts").aggregate(aggregation).toArray();
     return attachCreditMerchantSpend(db, accounts, { user_id, month_year, year });

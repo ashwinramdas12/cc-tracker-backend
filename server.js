@@ -650,7 +650,7 @@ api.post(
       client_name: process.env.PLAID_CLIENT_NAME || "PointGod",
       products: plaidProducts,
       transactions: {
-        days_requested: 730
+        days_requested: 20
       },
       country_codes: plaidCountryCodes,
       webhook: process.env.ENDPOINT_BASE + '/api/plaid/webhook/fQqMLcssXf',
